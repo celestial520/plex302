@@ -14,13 +14,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 先在本机把镜像跑起来，确认容器能启动、nginx 配置和 njs 模块没问题，
+  # 再推多架构镜像。冒烟不过就不发布，避免把坏镜像推给用户。
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (amd64, 本地加载)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: plex302:smoke
+
+      - name: 启动容器
+        run: |
+          set -e
+          mkdir -p "${PWD}/smoke-config"
+          docker run -d --name p302 \
+            -e TZ=Asia/Shanghai \
+            -e NGINX_PORT=32500 \
+            -e WEBUI_PORT=999 \
+            -p 32500:32500 -p 999:999 \
+            -v "${PWD}/smoke-config:/config" \
+            plex302:smoke
+
+      - name: 等待 WebUI 就绪
+        run: |
+          set -e
+          for i in $(seq 1 45); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:999/login || true)
+            if [ "$code" = "200" ]; then
+              echo "WebUI 就绪（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::WebUI 在 90 秒内没有就绪"
+          docker logs p302 || true
+          exit 1
+
+      - name: 接口断言
+        run: |
+          set -e
+          web=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:999/login)
+          api=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:999/api/status)
+          plex=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:32500/identity)
+          part=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:32500/library/parts/123/1/a.mkv)
+          echo "WebUI 登录页=$web 状态接口(未登录)=$api Plex 代理(无 Plex)=$plex 播放拦截(无 Plex)=$part"
+          # 502 说明 nginx 已经去连 Plex 但连不上，即 njs 正常跑完并走了回源分支；
+          # 如果 njs 抛异常这里会是 500。
+          [ "$web" = "200" ] || { echo "::error::登录页不是 200"; exit 1; }
+          [ "$api" = "401" ] || { echo "::error::未登录访问 /api/status 应为 401"; exit 1; }
+          [ "$plex" = "502" ] || { echo "::error::Plex 代理应回源失败 502"; exit 1; }
+          [ "$part" = "502" ] || { echo "::error::播放拦截在无 Plex 时应 502（500 代表 njs 异常）"; exit 1; }
+
+      - name: 输出日志
+        if: always()
+        run: |
+          docker logs p302 2>&1 | tail -50 || true
+          echo "--- runtime.json ---"
+          cat smoke-config/runtime.json 2>/dev/null || true
+
+      - name: 清理
+        if: always()
+        run: docker rm -f p302 || true
+
   docker:
     runs-on: ubuntu-latest
+    needs: smoke
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
