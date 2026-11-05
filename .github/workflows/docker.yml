@@ -76,12 +76,16 @@ jobs:
       - name: 端到端 302（假 Plex + 假直链）
         run: |
           set -e
-          # 用 docker0 网关 IP 而不是 host.docker.internal：
-          # nginx 的 proxy_pass 走自己配的 resolver，不读 /etc/hosts
-          GW=$(ip route | awk '/^default/ {print $3; exit}')
-          echo "宿主机网关=$GW"
+          # 用 docker0 网桥网关 IP（172.17.0.1），不是 runner 的默认路由；
+          # 另外 nginx 的 proxy_pass 走自己配的 resolver，不读 /etc/hosts，所以只能用 IP
+          GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          echo "网桥网关=$GW"
           python3 tests/mock_plex.py --host 0.0.0.0 --port 32401 --cdn-port 32402 &
           sleep 2
+
+          # 先确认容器能访问宿主机上的假 Plex，避免后面排错困难
+          docker exec p302 curl -fsS -m 5 "http://$GW:32401/identity" > /dev/null \
+            || { echo "::error::容器访问不到宿主机 $GW:32401"; exit 1; }
 
           # 登录拿 cookie，把 Plex 指向假 Plex，直链走自定义接口
           curl -s -c cookie.txt -X POST -H 'Content-Type: application/json' \
