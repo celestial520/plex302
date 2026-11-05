@@ -124,19 +124,31 @@ jobs:
           [ "$code" = "200" ] || { echo "::error::内网应回源 200"; exit 1; }
 
           echo "--- 115 最近文件 -> 局部入库 ---"
-          python3 tests/mock_115.py --host 0.0.0.0 --port 32403 &
+          python3 tests/mock_115.py --host 0.0.0.0 --port 32403 > /tmp/mock115.log 2>&1 &
           sleep 2
-          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:9999/api/115/recent/run > /dev/null
-          curl -s -X POST -H 'Content-Type: application/json' \
+          cat /tmp/mock115.log
+          mock=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Cookie: UID=ci; SEID=ci' \
+            'http://127.0.0.1:32403/files/recent?limit=1')
+          echo "mock 115 HTTP=$mock"
+          [ "$mock" = "200" ] || { echo "::error::假 115 没起来"; exit 1; }
+
+          # 第一轮：只记录，不扫描
+          first=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:9999/api/115/recent/run)
+          echo "第一轮 $first"
+
+          curl -s -m 5 -X POST -H 'Content-Type: application/json' \
             -d "{\"file_id\":\"9100\",\"file_name\":\"S01E01.mkv\",\"parent_id\":\"2002\",\"pick_code\":\"ci1\",\"file_size\":104857600,\"sha1\":\"cisha1\",\"ctime\":$(( $(date +%s) - 120 ))}" \
             http://127.0.0.1:32403/add > /dev/null
-          result=$(curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+
+          # 第二轮：应该入队扫描
+          second=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
             http://127.0.0.1:9999/api/115/recent/run)
-          echo "$result"
-          echo "$result" | grep -q '"queued":1' || { echo "::error::115 最近文件没有入队扫描"; exit 1; }
-          sleep 2
-          curl -s -b cookie.txt 'http://127.0.0.1:9999/api/scan/history?limit=5' | grep -q '115recent' \
+          echo "第二轮 $second"
+          echo "$second" | grep -q '"queued":1' || { echo "::error::115 最近文件没有入队扫描"; exit 1; }
+
+          sleep 3
+          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:9999/api/scan/history?limit=5' | grep -q '115recent' \
             || { echo "::error::扫描记录里没有 115recent 来源"; exit 1; }
 
       - name: 输出日志

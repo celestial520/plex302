@@ -578,7 +578,9 @@
       try {
         const res = await api('/api/115/cookie/test', { method: 'POST', body: { cookie } });
         const d = res.data || {};
-        out.textContent = `Cookie 可用，最近文件 ${d.count || 0} 条` + (d.sample && d.sample.name ? `（最新：${d.sample.name}）` : '');
+        out.textContent = `Cookie 可用，最近文件 ${d.count || 0} 条`
+          + (d.sample && d.sample.name ? `（最新：${d.sample.name}）` : '')
+          + (d.path ? ` → ${d.path}` : '');
       } catch (err) {
         out.textContent = err.message || 'Cookie 测试失败';
       }

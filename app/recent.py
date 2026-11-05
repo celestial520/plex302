@@ -146,6 +146,7 @@ class RecentWatcher:
             elif result.get("error"):
                 logger.warn(f"[115最近] 入队失败 {plex_path}：{result['error']}")
 
+        store.cleanup_recent(30)
         self.last_run = time.time()
         self.last_summary = {
             "enabled": True,

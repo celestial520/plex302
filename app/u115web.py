@@ -171,10 +171,13 @@ def folder_path(cfg: Dict[str, Any], cid: str) -> str:
 
 
 def test(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """测试 Cookie 是否可用，返回最近文件条数与示例。"""
+    """测试 Cookie：既拉最近文件，也反查一次目录路径，确认整条链路可用。"""
     items = recent(cfg, limit=5)
     sample = items[0] if items else None
-    return {"ok": True, "count": len(items), "sample": sample}
+    path = ""
+    if sample and sample.get("cid"):
+        path = folder_path(cfg, sample["cid"]).rstrip("/") + "/" + sample["name"]
+    return {"ok": True, "count": len(items), "sample": sample, "path": path}
 
 
 def self_test() -> Dict[str, Any]:
