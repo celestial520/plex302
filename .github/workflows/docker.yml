@@ -101,6 +101,7 @@ jobs:
           cfg["plex"]["token"] = "mock"
           cfg["provider"]["type"] = "custom"
           cfg["provider"]["custom_url"] = f"http://{os.environ['GW']}:32402/link"
+          cfg["mounts"] = [{"name": "CD2", "plex_prefix": "/mnt/cd2/115", "cloud_prefix": "/", "cd2_prefix": ""}]
           cfg["u115"]["cookie"] = "UID=ci; CID=ci; SEID=ci"
           cfg["u115"]["recent_limit"] = 20
           json.dump(cfg, open("cfg2.json", "w"))

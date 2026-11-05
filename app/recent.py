@@ -132,6 +132,10 @@ class RecentWatcher:
                 logger.warn(f"[115最近] 获取媒体库失败：{err}")
                 continue
             if not section:
+                self._warn_once(
+                    f"sec:{plex_path}",
+                    f"[115最近] 路径不在任何 Plex 媒体库里，跳过：{plex_path}",
+                )
                 store.mark_recent(key, name, cloud_path, plex_path)
                 skipped += 1
                 continue
