@@ -74,6 +74,10 @@ DEFAULTS: dict[str, Any] = {
         "min_size_mb": 20,
         "max_entries": 200000,
         "first_run_scan": False,
+        # 全量同步：把 Plex 所有媒体库整库扫一遍，作为兜底
+        "full_enabled": True,
+        "full_time": "04:30",
+        "full_on_start": False,
         "video_exts": [
             ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".ts", ".m2ts",
             ".flv", ".webm", ".iso", ".rmvb", ".mpg", ".mpeg", ".m4v",
@@ -83,14 +87,40 @@ DEFAULTS: dict[str, Any] = {
         "password_hash": "",
         "secret": "",
         "webhook_token": "",
+        # 给 CMS 的 Emby 兼容入口用（CMS 里 EMBY_API_KEY 填这个）
+        "emby_token": "",
     },
-    # 115 网页版 Cookie：开放平台没有“最近文件”接口，靠它补
+    # 115 网页版 Cookie：开放平台没有“最近操作”接口，靠它补
     "u115": {
         "cookie": "",
         "recent_enabled": True,
         "recent_interval": 120,
         "recent_limit": 50,
         "recent_first_scan": False,
+    },
+    # 115 生活事件（App 里的「最近操作」）：增量入库主通道
+    "events": {
+        "enabled": True,
+        "interval": 60,          # 拉取间隔（秒）
+        "limit": 100,            # 单页条数
+        "max_pages": 5,          # 一轮最多翻几页
+        "first_scan": False,     # 首次运行是否补扫历史
+        "settle_seconds": 120,   # 目录静置多久再扫（CMS 整理期间不断延长）
+        "max_wait_seconds": 900, # 单目录最长等待，避免一直有事件时永远不扫
+        "verify_enabled": True,  # 扫完再复核一次，接住“扫的时候还没写完”
+        "verify_delay": 300,     # 复核延迟（秒）
+        "recent_fallback": True, # 同时检查“最近文件”，兜住事件接口偶发空返回
+    },
+    "notify": {
+        "wecom_enabled": False,
+        "wecom_corpid": "",
+        "wecom_secret": "",
+        "wecom_agentid": "",
+        "wecom_touser": "@all",
+        "wecom_proxy": "",
+        "on_scan": True,
+        "on_full": True,
+        "on_error": True,
     },
     "advanced": {
         "force_direct_play": True,
@@ -212,6 +242,17 @@ def normalize(cfg: dict) -> dict:
     scan["max_depth"] = _as_int(scan.get("max_depth"), 4, 1, 12)
     scan["min_size_mb"] = _as_int(scan.get("min_size_mb"), 20, 0, 1024 * 1024)
     scan["max_entries"] = _as_int(scan.get("max_entries"), 200000, 1000, 5000000)
+    scan["full_enabled"] = _as_bool(scan.get("full_enabled"), True)
+    scan["full_on_start"] = _as_bool(scan.get("full_on_start"), False)
+    full_time = str(scan.get("full_time") or "04:30").strip()
+    try:
+        hh, mm = full_time.split(":")[:2]
+        hh, mm = int(hh), int(mm)
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError
+        scan["full_time"] = f"{hh:02d}:{mm:02d}"
+    except (ValueError, TypeError):
+        scan["full_time"] = "04:30"
     ws = scan.get("watch_sections")
     if isinstance(ws, str):
         ws = [x.strip() for x in ws.split(",") if x.strip()]
@@ -236,6 +277,8 @@ def normalize(cfg: dict) -> dict:
         security["secret"] = secrets.token_hex(32)
     if not security.get("webhook_token"):
         security["webhook_token"] = "p302_" + secrets.token_urlsafe(24)
+    if not security.get("emby_token"):
+        security["emby_token"] = "emb_" + secrets.token_urlsafe(24)
     security["password_hash"] = str(security.get("password_hash") or "")
 
     u115 = cfg["u115"]
@@ -247,6 +290,29 @@ def normalize(cfg: dict) -> dict:
     u115["recent_first_scan"] = _as_bool(u115.get("recent_first_scan"), False)
     u115["recent_interval"] = _as_int(u115.get("recent_interval"), 120, 30, 3600)
     u115["recent_limit"] = _as_int(u115.get("recent_limit"), 50, 5, 200)
+
+    events = cfg["events"]
+    events["enabled"] = _as_bool(events.get("enabled"), True)
+    events["first_scan"] = _as_bool(events.get("first_scan"), False)
+    events["interval"] = _as_int(events.get("interval"), 60, 15, 3600)
+    events["limit"] = _as_int(events.get("limit"), 100, 20, 500)
+    events["max_pages"] = _as_int(events.get("max_pages"), 5, 1, 20)
+    events["settle_seconds"] = _as_int(events.get("settle_seconds"), 120, 0, 3600)
+    events["max_wait_seconds"] = _as_int(events.get("max_wait_seconds"), 900, 60, 7200)
+    events["verify_enabled"] = _as_bool(events.get("verify_enabled"), True)
+    events["verify_delay"] = _as_int(events.get("verify_delay"), 300, 30, 3600)
+    events["recent_fallback"] = _as_bool(events.get("recent_fallback"), True)
+
+    notify = cfg["notify"]
+    notify["wecom_enabled"] = _as_bool(notify.get("wecom_enabled"), False)
+    notify["wecom_corpid"] = str(notify.get("wecom_corpid") or "").strip()
+    notify["wecom_secret"] = str(notify.get("wecom_secret") or "").strip()
+    notify["wecom_agentid"] = str(notify.get("wecom_agentid") or "").strip()
+    notify["wecom_touser"] = str(notify.get("wecom_touser") or "@all").strip() or "@all"
+    notify["wecom_proxy"] = str(notify.get("wecom_proxy") or "").strip().rstrip("/")
+    notify["on_scan"] = _as_bool(notify.get("on_scan"), True)
+    notify["on_full"] = _as_bool(notify.get("on_full"), True)
+    notify["on_error"] = _as_bool(notify.get("on_error"), True)
 
     adv = cfg["advanced"]
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
@@ -336,6 +402,8 @@ def masked(cfg: dict) -> dict:
     out["u115"]["cookie"] = ""
     out["security"]["password_set"] = bool(out["security"].get("password_hash"))
     out["security"].pop("password_hash", None)
+    out["notify"]["wecom_secret_set"] = bool(out["notify"].get("wecom_secret"))
+    out["notify"]["wecom_secret"] = ""
     out["security"].pop("secret", None)
     return out
 
@@ -366,4 +434,10 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
         security["password_hash"] = old_cfg["security"].get("password_hash", "")
     security.setdefault("secret", old_cfg["security"].get("secret", ""))
     security.setdefault("webhook_token", old_cfg["security"].get("webhook_token", ""))
+    if not security.get("emby_token"):
+        security["emby_token"] = old_cfg["security"].get("emby_token", "")
+    notify = new_cfg.setdefault("notify", {})
+    notify.pop("wecom_secret_set", None)
+    if not notify.get("wecom_secret"):
+        notify["wecom_secret"] = old_cfg.get("notify", {}).get("wecom_secret", "")
     return new_cfg

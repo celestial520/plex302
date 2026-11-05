@@ -67,17 +67,52 @@ def _db() -> sqlite3.Connection:
             scanned INTEGER DEFAULT 0
         )"""
     )
+    # 115 生活事件流水：只留最近一个月，给 WebUI 看“到底触发了什么”
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            type INTEGER,
+            name TEXT,
+            file_id TEXT,
+            cloud_path TEXT,
+            plex_path TEXT,
+            target TEXT,
+            scanned INTEGER DEFAULT 0,
+            created_at REAL,
+            seen_at REAL
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS poll_state (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at REAL
+        )"""
+    )
+    # 老库补列：扫描类型（path=局部，full=全量）
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(scans)").fetchall()}
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE scans ADD COLUMN kind TEXT DEFAULT 'path'")
+    except sqlite3.Error:
+        pass
     conn.commit()
     _conn = conn
     return conn
 
 
-def add_scan(path: str, section_id: str | None, section_name: str | None, source: str) -> int:
+def add_scan(
+    path: str,
+    section_id: str | None,
+    section_name: str | None,
+    source: str,
+    kind: str = "path",
+) -> int:
     with _lock:
         cur = _db().execute(
-            "INSERT INTO scans(path, section_id, section_name, source, status, message, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (path, section_id, section_name, source, "queued", "", time.time()),
+            "INSERT INTO scans(path, section_id, section_name, source, status, message, created_at, kind) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (path, section_id, section_name, source, "queued", "", time.time(), kind),
         )
         _db().commit()
         return int(cur.lastrowid)
@@ -207,6 +242,73 @@ def cleanup_recent(days: int = 30) -> None:
     cutoff = time.time() - days * 86400
     with _lock:
         _db().execute("DELETE FROM recent_seen WHERE seen_at < ?", (cutoff,))
+        _db().commit()
+
+
+# ---------------------------------------------------------------- 115 生活事件
+def event_seen(event_id: str) -> bool:
+    if not event_id:
+        return False
+    with _lock:
+        row = _db().execute("SELECT 1 FROM events WHERE id=?", (str(event_id),)).fetchone()
+    return bool(row)
+
+
+def mark_event(
+    event_id: str,
+    type_: int,
+    name: str,
+    file_id: str,
+    cloud_path: str,
+    plex_path: str,
+    target: str,
+    created_at: float = 0,
+    scanned: bool = False,
+) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO events(id, type, name, file_id, cloud_path, plex_path, target, scanned, created_at, seen_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(event_id), int(type_ or 0), name[:400], str(file_id or ""), cloud_path, plex_path,
+                target, 1 if scanned else 0, float(created_at or time.time()), time.time(),
+            ),
+        )
+        _db().commit()
+
+
+def events(limit: int = 50) -> list[dict[str, Any]]:
+    with _lock:
+        rows = _db().execute("SELECT * FROM events ORDER BY seen_at DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def event_count() -> int:
+    with _lock:
+        row = _db().execute("SELECT COUNT(*) AS c FROM events").fetchone()
+    return int(row["c"] if row else 0)
+
+
+def cleanup_events(days: int = 30) -> None:
+    cutoff = time.time() - days * 86400
+    with _lock:
+        _db().execute("DELETE FROM events WHERE seen_at < ?", (cutoff,))
+        _db().commit()
+
+
+# ---------------------------------------------------------------- 轮询游标
+def state_get(key: str, default: str = "") -> str:
+    with _lock:
+        row = _db().execute("SELECT value FROM poll_state WHERE key=?", (str(key),)).fetchone()
+    return str(row["value"]) if row else default
+
+
+def state_set(key: str, value: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO poll_state(key, value, updated_at) VALUES (?,?,?)",
+            (str(key), str(value), time.time()),
+        )
         _db().commit()
 
 

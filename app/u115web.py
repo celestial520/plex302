@@ -63,8 +63,14 @@ def _cookie(cfg: Dict[str, Any]) -> str:
     return cookie
 
 
-def _get(cfg: Dict[str, Any], path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Dict[str, Any]:
-    url = BASE + path
+def _get(
+    cfg: Dict[str, Any],
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: int = 15,
+    base: Optional[str] = None,
+) -> Dict[str, Any]:
+    url = (base or BASE) + path
     headers = {
         "Cookie": _cookie(cfg),
         "User-Agent": DEFAULT_UA,
@@ -142,6 +148,12 @@ def recent(cfg: Dict[str, Any], limit: int = 50, offset: int = 0) -> List[Dict[s
         return []
     out = [_norm_item(x) for x in data if isinstance(x, dict)]
     return [x for x in out if x["name"]]
+
+
+def clear_path_cache() -> None:
+    """目录改名/移动后，缓存里的旧路径要立刻失效。"""
+    with _path_lock:
+        _path_cache.clear()
 
 
 def folder_path(cfg: Dict[str, Any], cid: str) -> str:

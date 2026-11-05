@@ -10,17 +10,26 @@
     status: null,
     sections: [],
     scans: [],
+    events: [],
     tab: 'overview',
     timers: {},
     qrTimer: null,
   };
 
+  const THEME_KEY = 'p302-theme';
+  const THEME_ORDER = ['auto', 'light', 'dark'];
+  const THEME_LABEL = { auto: '自动', light: '浅色', dark: '深色' };
+  const SOURCE_LABEL = {
+    manual: '手动', cms: 'CMS', 'cms-emby': 'CMS', '115event': '115事件',
+    '115recent': '115最近', watch: '目录监听', verify: '复核', schedule: '定时',
+  };
+
   const TITLES = {
-    overview: ['概览', '外网播放 302 到云盘，内网回源 Plex；CMS 整理完自动局部入库。'],
+    overview: ['概览', '外网 302、115 操作事件增量入库、每天全量兜底。'],
     library: ['媒体库', 'Plex 媒体库路径、自动监听开关和单库扫描。'],
-    scans: ['扫描记录', '局部扫描的入队、执行结果与失败原因。'],
-    settings: ['设置', '连接、路径映射、直链方式、扫描策略与安全。'],
-    logs: ['日志', '302 决策、扫描、CMS 通知和错误都会记录。'],
+    scans: ['扫描记录', '局部扫描与全量同步的入队、执行结果和失败原因。'],
+    settings: ['设置', '连接、路径映射、直链方式、自动入库、通知与安全。'],
+    logs: ['日志', '302 决策、115 事件、扫描和错误都会记录。'],
   };
 
   // ------------------------------------------------------------------ 基础
@@ -86,11 +95,39 @@
     ta.remove();
   }
 
+  // ------------------------------------------------------------------ 主题
+  function themeMode() {
+    try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; }
+  }
+
+  function applyTheme(mode, save) {
+    if (THEME_ORDER.indexOf(mode) < 0) mode = 'auto';
+    if (save !== false) {
+      try { localStorage.setItem(THEME_KEY, mode); } catch (e) { /* ignore */ }
+    }
+    const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = mode === 'auto' ? (dark ? 'dark' : 'light') : mode;
+    document.documentElement.dataset.themeMode = mode;
+    const icon = mode === 'auto' ? 'i-auto' : (mode === 'light' ? 'i-sun' : 'i-moon');
+    $$('[data-theme-toggle]').forEach((btn) => {
+      const use = btn.querySelector('use');
+      if (use) use.setAttribute('href', '#' + icon);
+      btn.title = '主题：' + THEME_LABEL[mode] + '（点击切换）';
+    });
+    $$('[data-theme-seg] button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+  }
+
+  function cycleTheme() {
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(themeMode()) + 1) % THEME_ORDER.length];
+    applyTheme(next);
+    toast('外观：' + THEME_LABEL[next], 'ok');
+  }
+
   // ------------------------------------------------------------------ 路由
   function switchTab(tab) {
     if (!TITLES[tab]) tab = 'overview';
     state.tab = tab;
-    $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
+    $$('.nav a, .tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + tab));
     $('#page-title').textContent = TITLES[tab][0];
     $('#page-sub').textContent = TITLES[tab][1];
@@ -104,18 +141,22 @@
   // ------------------------------------------------------------------ 数据
   async function loadAll(silent) {
     try {
-      const [status, cfg, sections, scans] = await Promise.all([
+      const [status, cfg, sections, scans, events] = await Promise.all([
         api('/api/status'),
         api('/api/config'),
         api('/api/plex/sections').catch(() => ({ data: [] })),
         api('/api/scan/history?limit=50').catch(() => ({ data: [] })),
+        api('/api/115/events?limit=8').catch(() => ({ data: [] })),
       ]);
       state.status = status.data;
       state.config = cfg.data;
       state.sections = sections.data || [];
       state.scans = scans.data || [];
+      state.events = events.data || [];
       renderStatus();
       renderOverviewScans();
+      renderEvents();
+      renderFullStatus();
       renderLibraries();
       renderScans();
       if (state.tab === 'settings' && !document.querySelector('#settings-body .form-section')) renderSettings();
@@ -129,9 +170,15 @@
 
   async function refreshStatusOnly() {
     try {
-      const res = await api('/api/status');
+      const [res, ev] = await Promise.all([
+        api('/api/status'),
+        api('/api/115/events?limit=8').catch(() => ({ data: [] })),
+      ]);
       state.status = res.data;
+      state.events = ev.data || [];
       renderStatus();
+      renderEvents();
+      renderFullStatus();
     } catch (e) { /* ignore */ }
   }
 
@@ -177,34 +224,42 @@
     $('#stat-total').textContent = (stats.totals && stats.totals.redirects) || 0;
     $('#stat-scans').textContent = stats.scans_today || 0;
 
+    const ev = s.events || {};
+    const evSummary = ev.summary || {};
+    const pending = Number(ev.pending || 0);
+    $('#stat-pending').textContent = pending;
+    if (ev.enabled === false) $('#stat-pending-sub').textContent = '115 事件监听已关闭';
+    else if (!ev.cookie_set) $('#stat-pending-sub').textContent = '未配置 115 Cookie';
+    else if (evSummary.at) $('#stat-pending-sub').textContent = `上轮入队 ${evSummary.queued || 0} · 复核 ${ev.verify || 0}`;
+    else $('#stat-pending-sub').textContent = '等待首轮检查';
+
+    $('#side-version').textContent = 'v' + (s.version || '1.2.0');
+
     const watch = s.watch || {};
-    if (watch.enabled === false) {
-      $('#stat-watch').textContent = '关闭';
-      $('#stat-watch-sub').textContent = '可在设置中开启';
-    } else if (watch.at) {
-      $('#stat-watch').textContent = watch.queued != null ? String(watch.queued) : '0';
-      $('#stat-watch-sub').textContent = `上轮 ${watch.files || 0} 个视频 / 新增 ${watch.new || 0}`;
-    } else {
-      $('#stat-watch').textContent = '待运行';
-      $('#stat-watch-sub').textContent = '启动后 20 秒开始首轮索引';
-    }
-
-    $('#side-version').textContent = 'v' + (s.version || '1.0.0');
-
-    const recent = s.recent || {};
+    const full = s.full || {};
     const rows = [
       ['Plex 服务器', plex.ok ? `v${plex.version || ''} · ${plex.name || ''}` : (plex.error || '未连接'), plex.ok, '#i-play'],
       ['115 开放平台', u115.authorized ? `${u115.user_name || '已授权'} · token 有效` : '未授权，外网 302 不可用', !!u115.authorized, '#i-link'],
+      ['115 操作事件', !ev.cookie_set ? '未配置 Cookie（设置 → 115 授权）'
+        : (evSummary.first_run ? '已记录游标，等待新事件'
+          : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')),
+        !!ev.cookie_set && evSummary.ok !== false, '#i-events'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : (cd2.message || '未连接'), !!cd2.ok, '#i-scan'],
       ['目录监听', watch.enabled === false ? '已关闭' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled !== false, '#i-logs'],
-      ['115 最近文件', !recent.cookie_set ? '未配置 Cookie' : (recent.summary && recent.summary.at ? `已记录 ${recent.seen || 0} 条 · 上轮入队 ${recent.summary.queued || 0}` : '等待首轮检查'), !!recent.cookie_set && !(recent.summary && recent.summary.ok === false), '#i-link'],
+      ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
+      ['企业微信', (s.notify && s.notify.wecom) ? '已启用 · 入库 / 全量 / 错误都会通知' : '未启用（设置 → 通知）', (s.notify && s.notify.wecom) ? true : 'idle', '#i-bell'],
     ];
-    $('#status-list').innerHTML = rows.map((r) => `
+    $('#status-list').innerHTML = rows.map((r) => {
+      const state = r[2] === 'idle'
+        ? '<span class="badge">未启用</span>'
+        : (r[2] ? '<span class="badge ok">正常</span>' : '<span class="badge bad">异常</span>');
+      return `
       <div class="status-row">
         <div class="status-ico"><svg><use href="${r[3]}"></use></svg></div>
         <div class="status-main"><b>${esc(r[0])}</b><span>${esc(r[1])}</span></div>
-        <div class="status-val">${r[2] ? '<span class="badge ok">正常</span>' : '<span class="badge bad">异常</span>'}</div>
-      </div>`).join('');
+        <div class="status-val">${state}</div>
+      </div>`;
+    }).join('');
   }
 
   function renderOverviewScans() {
@@ -217,10 +272,69 @@
     }
     body.innerHTML = rows.map((r) => `
       <tr>
-        <td class="muted">${fmtTime(r.created_at)}</td>
-        <td><span class="path" title="${esc(r.path)}">${esc(shortPath(r.path, 42))}</span></td>
-        <td>${statusBadge(r.status)}</td>
+        <td class="muted" data-label="时间">${fmtTime(r.created_at)}</td>
+        <td data-label="路径"><span class="path" title="${esc(r.path)}">${esc(shortPath(r.path, 42))}</span></td>
+        <td data-label="状态">${statusBadge(r.status)}</td>
       </tr>`).join('');
+  }
+
+  // ------------------------------------------------------------------ 115 事件 / 全量
+  function eventIcon(type) {
+    if (type === 22) return '#i-trash';
+    if (type === 17 || type === 18 || type === 20) return '#i-library';
+    if (type === 5 || type === 6) return '#i-scan';
+    if (type === 14) return '#i-link';
+    return '#i-plus';
+  }
+
+  function eventLabel(type) {
+    return {
+      1: '上传图片', 2: '上传', 3: '收藏', 4: '收藏', 5: '移动', 6: '移动',
+      14: '接收', 17: '新建目录', 18: '复制目录', 20: '目录改名',
+      22: '删除', 23: '复制', 24: '改名',
+    }[type] || '变更';
+  }
+
+  function renderEvents() {
+    const list = $('#event-list');
+    if (!list) return;
+    const items = state.events || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">还没有记录。填好 115 Cookie 后，这里会显示上传 / 移动 / 改名 / 复制 / 删除。</div>';
+      return;
+    }
+    list.innerHTML = items.slice(0, 8).map((e) => {
+      const target = e.target || e.plex_path || e.cloud_path || '';
+      return `<div class="event-item">
+        <div class="event-ico"><svg><use href="${eventIcon(e.type)}"></use></svg></div>
+        <div class="event-main">
+          <b>${esc(e.name)}</b>
+          <span title="${esc(target)}">${esc(eventLabel(e.type))}${target ? ' · ' + esc(shortPath(target, 46)) : ''}</span>
+        </div>
+        <div class="event-time">${fmtTime(e.created_at || e.seen_at).slice(6, 11)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderFullStatus() {
+    const box = $('#full-status');
+    const f = (state.status && state.status.full) || {};
+    if (!box) return;
+    if (f.running) {
+      const percent = f.total ? Math.round((f.done / f.total) * 100) : 0;
+      box.innerHTML = `<div class="callout info">正在整库扫描 ${f.done || 0}/${f.total || 0}${f.current ? ' · ' + esc(f.current) : ''}</div>
+        <div style="height:6px;border-radius:999px;background:var(--hover);margin-top:10px;overflow:hidden">
+          <i style="display:block;height:100%;width:${percent}%;background:linear-gradient(90deg,var(--accent),var(--accent-2))"></i>
+        </div>`;
+      return;
+    }
+    if (f.finished_at) {
+      box.innerHTML = `<div class="callout ${f.failed ? '' : 'info'}">
+        ${fmtTime(f.finished_at)} 完成 · ${f.done || 0}/${f.total || 0} 个媒体库${f.failed ? ' · 失败 ' + f.failed : ''}${f.elapsed ? ' · ' + Math.round(f.elapsed) + 's' : ''}
+      </div><div class="desc" style="margin-top:8px;font-size:11px;color:var(--muted-2)">来源：${esc(SOURCE_LABEL[f.source] || f.source || '—')}</div>`;
+      return;
+    }
+    box.innerHTML = '<div class="empty">还没有跑过全量同步</div>';
   }
 
   function shortPath(path, max) {
@@ -254,12 +368,12 @@
     }
     body.innerHTML = secs.map((s) => `
       <tr>
-        <td><b>${esc(s.title)}</b></td>
-        <td><span class="badge ${s.type === 'movie' ? 'movie' : 'show'}">${s.type === 'movie' ? '电影' : s.type === 'show' ? '剧集' : esc(s.type)}</span></td>
-        <td>${(s.locations || []).map((p) => `<div class="path mono">${esc(p)}</div>`).join('') || '<span class="muted">—</span>'}</td>
-        <td>${s.count || 0}</td>
-        <td><label class="switch"><input type="checkbox" data-lib="${esc(s.key)}" ${s.watching ? 'checked' : ''}><i></i></label></td>
-        <td><button class="btn sm" data-scan-lib="${esc(s.key)}" data-scan-path="${esc((s.locations || [])[0] || '')}">扫描</button></td>
+        <td data-label="媒体库"><b>${esc(s.title)}</b></td>
+        <td data-label="类型"><span class="badge ${s.type === 'movie' ? 'movie' : 'show'}">${s.type === 'movie' ? '电影' : s.type === 'show' ? '剧集' : esc(s.type)}</span></td>
+        <td data-label="路径">${(s.locations || []).map((p) => `<div class="path mono">${esc(p)}</div>`).join('') || '<span class="muted">—</span>'}</td>
+        <td data-label="影片数">${s.count || 0}</td>
+        <td data-label="自动监听"><label class="switch"><input type="checkbox" data-lib="${esc(s.key)}" ${s.watching ? 'checked' : ''}><i></i></label></td>
+        <td data-label="操作"><button class="btn sm" data-scan-lib="${esc(s.key)}" data-scan-path="${esc((s.locations || [])[0] || '')}">扫描</button></td>
       </tr>`).join('');
 
     $$('#lib-body input[data-lib]').forEach((el) => {
@@ -291,12 +405,12 @@
     }
     body.innerHTML = rows.map((r) => `
       <tr>
-        <td class="muted" style="white-space:nowrap">${fmtTime(r.created_at)}</td>
-        <td><span class="path mono" title="${esc(r.path)}">${esc(r.path)}</span></td>
-        <td>${esc(r.section_name || '—')}</td>
-        <td><span class="badge">${esc(r.source || 'manual')}</span></td>
-        <td>${statusBadge(r.status)}</td>
-        <td class="muted">${esc(r.message || '')}</td>
+        <td class="muted" style="white-space:nowrap" data-label="时间">${fmtTime(r.created_at)}</td>
+        <td data-label="路径"><span class="path mono" title="${esc(r.path)}">${esc(r.path)}</span></td>
+        <td data-label="媒体库">${esc(r.section_name || '—')}</td>
+        <td data-label="来源"><span class="badge ${r.kind === 'full' ? 'full' : ''}">${esc(SOURCE_LABEL[r.source] || r.source || 'manual')}</span></td>
+        <td data-label="状态">${statusBadge(r.status)}</td>
+        <td class="muted" data-label="信息">${esc(r.message || '')}</td>
       </tr>`).join('');
   }
 
@@ -355,6 +469,24 @@
       <div class="form-body ${single ? 'single' : ''}">${body}</div></div>`;
   }
 
+  // 点一下就能选的数字输入（带常用值下拉）
+  function combo(id, value, presets, unit) {
+    unit = unit || '秒';
+    const options = (presets || []).map((v) => {
+      let label = `${v} ${unit}`;
+      if (unit === '秒') {
+        if (v >= 3600) label = `${v / 3600} 小时`;
+        else if (v >= 60) label = v % 60 === 0 ? `${v / 60} 分钟` : `${Math.floor(v / 60)} 分 ${v % 60} 秒`;
+      }
+      return `<button type="button" data-value="${v}"><span>${label}</span><small>${v} ${unit}</small></button>`;
+    }).join('');
+    return `<div class="combo" data-combo>
+      <input class="input" id="${id}" type="number" inputmode="numeric" value="${esc(value == null ? '' : value)}">
+      <button type="button" class="combo-arrow" tabindex="-1" aria-label="选择常用值"><svg><use href="#i-chevron"></use></svg></button>
+      <div class="combo-menu">${options}</div>
+    </div>`;
+  }
+
   function renderSettings() {
     const c = state.config;
     if (!c) return;
@@ -389,10 +521,10 @@
           <button class="btn sm" id="btn-115-check">刷新状态</button>
         </div></div>
         <div class="field full" style="margin-top:18px">
-          <label>115 网页 Cookie <span class="muted">（用于“最近文件”监听，可选）</span></label>
+          <label>115 网页 Cookie <span class="muted">（增量入库必需）</span></label>
           <textarea class="input" id="cfg-115-cookie" rows="3" placeholder="${c.u115.cookie_set ? '已保存（' + esc(c.u115.cookie_hint || '') + '），留空不修改' : 'UID=...; CID=...; SEID=...'}"></textarea>
           <span class="desc">浏览器登录 <code>115.com</code> → F12 → Network → 随便点一个 <code>webapi.115.com</code> 请求 → 复制请求头里的 Cookie。
-          开放平台没有“最近文件”接口，靠它发现 CMS 刚整理进 media 目录的文件，比目录轮询更不容易漏。</span>
+          它用来读 115 的「最近操作」：CMS 整理完是移动 / 改名 / 复制，plex302 立刻就能知道，比等目录刷新可靠。</span>
         </div>
         <div class="field full"><div class="field-row">
           <button class="btn sm" id="btn-115-cookie-test">测试 Cookie</button>
@@ -453,37 +585,95 @@
         </div>
       `, true)}
 
-      ${section('扫描与自动入库', '只调 Plex 官方局部扫描接口。CD2 目录监听负责发现 CMS 整理后的新文件。', `
+      ${section('扫描与自动入库', '三层配合：115 操作事件（主）→ 目录监听（可选）→ 每天全量（兜底）。', `
         <div class="field full">
-          ${switchLine('启用扫描', '关闭后手动/CMS/监听都不会触发 Plex 扫描', 'cfg-scan-enabled', c.scan.enabled)}
-          ${switchLine('目录监听', '轮询 CD2 挂载目录，发现新视频后自动局部扫描', 'cfg-watch-enabled', c.scan.watch_enabled)}
+          ${switchLine('启用扫描', '关闭后手动 / CMS / 事件都不会触发 Plex 扫描', 'cfg-scan-enabled', c.scan.enabled)}
+          ${switchLine('CD2 目录监听', '轮询挂载目录做兜底；库很大时可以关掉，交给 115 事件 + 全量', 'cfg-watch-enabled', c.scan.watch_enabled)}
           ${switchLine('首次索引时也扫描', '默认只建索引，避免第一次启动就把全库扫一遍', 'cfg-first-scan', c.scan.first_run_scan)}
         </div>
-        <div class="field"><label>轮询间隔（秒）</label>${input('cfg-interval', c.scan.interval, '180', 'number')}</div>
-        <div class="field"><label>文件静置（秒）</label>${input('cfg-settle', c.scan.settle_seconds, '90', 'number')}
-          <span class="desc">文件修改时间小于这个值先跳过，避免整理中途被扫到。</span></div>
+        <div class="field"><label>目录轮询间隔</label>${combo('cfg-interval', c.scan.interval, [60, 120, 180, 300, 600, 1800])}<span class="desc">CD2 挂载目录的轮询周期。</span></div>
+        <div class="field"><label>文件静置</label>${combo('cfg-settle', c.scan.settle_seconds, [30, 60, 90, 180])}<span class="desc">文件修改时间小于这个值先跳过。</span></div>
         <div class="field"><label>最大目录深度</label>${input('cfg-depth', c.scan.max_depth, '4', 'number')}</div>
         <div class="field"><label>最小文件大小（MB）</label>${input('cfg-minsize', c.scan.min_size_mb, '20', 'number')}</div>
 
         <div class="field full" style="margin-top:6px">
-          <div class="callout info">下面这组是「115 最近文件监听」：直接问 115 服务端最近有没有新文件，不依赖 CD2 目录缓存，
-          适合 CMS 整理完立刻入库、又怕目录轮询漏掉的场景。需要先在上面填 115 Cookie。</div>
+          <div class="callout info">下面这组是 <b>115 操作事件</b>（就是 115 App 里的「最近操作」）：拉取上传 / 移动 / 改名 / 复制 / 删除流水，
+          游标增量、按事件 ID 去重。CMS 整理完的那一刻事件就产生了，不依赖 CD2 目录缓存。</div>
         </div>
         <div class="field full">
-          ${switchLine('115 最近文件监听', '定时拉取 115 最近变动，发现新视频就局部扫描', 'cfg-recent-enabled', c.u115.recent_enabled)}
-          ${switchLine('首次运行也扫描', '第一次启动时把当前最近文件也入库；默认只记录，不批量扫', 'cfg-recent-first', c.u115.recent_first_scan)}
+          ${switchLine('115 操作事件监听（增量入库）', '定时拉取 115 操作流水，发现新视频就局部扫描', 'cfg-events-enabled', c.events.enabled)}
+          ${switchLine('首次运行也扫描', '默认只记录游标，不补扫历史，避免一上来扫全库', 'cfg-events-first', c.events.first_scan)}
+          ${switchLine('扫完再复核一次', '几分钟后对同一目录再扫一次，接住“扫的时候还没写完”', 'cfg-events-verify', c.events.verify_enabled)}
+          ${switchLine('最近文件兜底', '事件接口偶发空返回时，用最近文件列表补一刀', 'cfg-events-recent', c.events.recent_fallback)}
         </div>
-        <div class="field"><label>115 检查间隔（秒）</label>${input('cfg-recent-interval', c.u115.recent_interval, '120', 'number')}</div>
-        <div class="field"><label>每次检查条数</label>${input('cfg-recent-limit', c.u115.recent_limit, '50', 'number')}
-          <span class="desc">建议 30~100，越大越不容易漏，但请求也越重。</span></div>
+        <div class="field"><label>事件检查间隔</label>${combo('cfg-events-interval', c.events.interval, [30, 60, 120, 300, 600])}</div>
+        <div class="field"><label>目录静置多久再扫</label>${combo('cfg-events-settle', c.events.settle_seconds, [60, 120, 180, 300, 600])}
+          <span class="desc">CMS 还在整理时，每来一个新事件就往后延。</span></div>
+        <div class="field"><label>单目录最长等待</label>${combo('cfg-events-maxwait', c.events.max_wait_seconds, [300, 600, 900, 1800])}
+          <span class="desc">一直有事件也不会无限等。</span></div>
+        <div class="field"><label>复核延迟</label>${combo('cfg-events-verify-delay', c.events.verify_delay, [120, 300, 600, 1800])}</div>
+        <div class="field"><label>每次拉取条数</label>${combo('cfg-events-limit', c.events.limit, [50, 100, 200, 300], '条')}</div>
         <div class="field full"><div class="field-row">
-          <button class="btn sm" id="btn-recent-run">立即检查一次</button>
-          <span class="desc" id="recent-run-result"></span>
+          <button class="btn sm" id="btn-events-run">立即检查 115</button>
+          <span class="desc" id="events-run-result"></span>
         </div></div>
 
         <div class="field full"><label>CMS / 外部通知 Webhook</label>
           <div class="field-row"><input class="input" id="cfg-webhook" readonly value="${esc((state.status && state.status.webhook_url) || '')}"><button class="btn sm" id="btn-copy-hook"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc">CMS 整理完可以 GET 这个地址并带 <code>&amp;path=/电影/xxx</code>；也支持 POST JSON <code>{"path":"/电影/xxx"}</code>。不带 path 时监听会兜底。</span>
+          <span class="desc">任何能发 HTTP 的工具都能调：<code>GET ...&amp;path=/电影/xxx</code>、<code>POST {"path":"..."}</code>，或 <code>&amp;full=1</code> 直接全量。
+          CMS 的 Emby 扫库通知也能接（见下面「CMS 对接」）。</span>
+        </div>
+      `, true)}
+
+      ${section('全量同步', '把 Plex 所有媒体库整库扫一遍。增量再稳也可能漏，这是最后的保险。', `
+        <div class="field full">
+          ${switchLine('每天定时全量', '到点自动把所有媒体库扫一遍', 'cfg-full-enabled', c.scan.full_enabled)}
+          ${switchLine('启动时也全量一次', '容器重启后如果今天还没跑过，补一次', 'cfg-full-start', c.scan.full_on_start)}
+        </div>
+        <div class="field"><label>每天几点跑</label><input class="input" id="cfg-full-time" type="time" value="${esc(c.scan.full_time || '04:30')}"></div>
+        <div class="field"><label>&nbsp;</label><button class="btn sm" id="btn-full-run-settings"><svg><use href="#i-full"></use></svg>立即全量扫描</button></div>
+        <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。</div></div>
+      `)}
+
+      ${section('通知（企业微信）', '和 115 秒传助手用同一套应用消息：CorpID + Secret + AgentID + 接收人，可选代理。', `
+        <div class="field full">${switchLine('启用企业微信通知', '入库完成、全量结果、Cookie 失效都会推送', 'cfg-wecom-enabled', c.notify.wecom_enabled)}</div>
+        <div class="field"><label>CorpID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, '企业微信 → 我的企业 → 企业ID')}</div>
+        <div class="field"><label>AgentID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '应用详情里的 AgentId')}</div>
+        <div class="field"><label>Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '应用详情里的 Secret', 'password')}</div>
+        <div class="field"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all')}<span class="desc">成员账号用 <code>|</code> 分隔，默认全体。</span></div>
+        <div class="field full"><label>代理地址（可选）</label>${input('cfg-wecom-proxy', c.notify.wecom_proxy, 'http://proxy:8980')}<span class="desc">企业微信 API 的转发地址，只换 host、路径不变。</span></div>
+        <div class="field full">
+          ${switchLine('入库通知', '一轮扫描结束后汇总成一条，避免刷屏', 'cfg-notify-scan', c.notify.on_scan)}
+          ${switchLine('全量同步通知', '全量结束发一条汇总', 'cfg-notify-full', c.notify.on_full)}
+          ${switchLine('错误通知', 'Cookie 失效 / 拉取失败，同类 30 分钟只发一次', 'cfg-notify-error', c.notify.on_error)}
+        </div>
+        <div class="field full"><div class="field-row"><button class="btn sm" id="btn-notify-test"><svg><use href="#i-bell"></use></svg>发送测试消息</button><span class="desc" id="notify-test-result"></span></div></div>
+      `)}
+
+      ${section('CMS 对接', '两种方式，任选一种；都失效时还有 115 事件和全量兜底。', `
+        <div class="field full">
+          <div class="callout info">
+            <b>方式一（推荐）：什么都不用配。</b> CMS 整理就是把文件移动 / 改名到 media 目录，这本身就是 115 操作事件，
+            plex302 会感知到并延迟合并扫描。<br><br>
+            <b>方式二：让 CMS 主动通知。</b> CMS 的「通知 Emby 扫库」可以把地址填成本容器：
+            <code>EMBY_HOST_PORT=http://NAS:999</code>、<code>EMBY_API_KEY=${esc((state.config && state.config.security && state.config.security.emby_token) || '')}</code>，
+            它会打 <code>/emby/Library/Refresh</code>，plex302 收到就触发全量（或单库）扫描。
+          </div>
+        </div>
+        <div class="field full"><label>Emby 兼容地址</label>
+          <div class="field-row"><input class="input" id="cfg-emby-url" readonly value="${esc((state.status && state.status.emby_url) || '')}"><button class="btn sm" id="btn-copy-emby"><svg><use href="#i-copy"></use></svg>复制</button></div>
+          <span class="desc">给 CMS / 其他只支持 Emby 通知的工具用；会校验 <code>api_key</code>。</span>
+        </div>
+      `, true)}
+
+      ${section('外观', '自动跟随系统，也可以固定浅色 / 深色。只保存在当前浏览器。', `
+        <div class="field full">
+          <div class="seg" data-theme-seg>
+            <button type="button" data-mode="auto"><svg><use href="#i-auto"></use></svg>自动</button>
+            <button type="button" data-mode="light"><svg><use href="#i-sun"></use></svg>浅色</button>
+            <button type="button" data-mode="dark"><svg><use href="#i-moon"></use></svg>深色</button>
+          </div>
+          <span class="desc">手机上会自动启用底部导航和卡片式列表。</span>
         </div>
       `, true)}
 
@@ -510,6 +700,82 @@
     `;
     $('#settings-body').innerHTML = html;
     bindSettings();
+  }
+
+  async function runEvents(btn, out) {
+    if (btn) btn.disabled = true;
+    if (out) out.textContent = '检查中…';
+    try {
+      const res = await api('/api/115/events/run', { method: 'POST', body: {} });
+      const d = res.data || {};
+      const msg = d.first_run
+        ? `首次运行：已记录游标（${d.checked || 0} 条），不补扫历史`
+        : `检查 ${d.checked || 0} 条 / 新事件 ${d.new || 0} / 待扫 ${d.queued || 0}`;
+      toast(msg, 'ok');
+      if (out) out.textContent = msg;
+      loadAll(true);
+      loadScans();
+    } catch (err) {
+      toast(err.message, 'bad');
+      if (out) out.textContent = err.message || '检查失败';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function runFull(out) {
+    try {
+      await api('/api/sync/full', { method: 'POST', body: {} });
+      toast('全量同步已开始', 'ok');
+      if (out) out.textContent = '全量同步已开始，正在逐个媒体库扫描…';
+      let tries = 0;
+      const timer = setInterval(async () => {
+        tries += 1;
+        await refreshStatusOnly();
+        if (out && state.status && state.status.full) {
+          const f = state.status.full;
+          out.textContent = f.running
+            ? `正在扫描 ${f.done || 0}/${f.total || 0}${f.current ? ' · ' + f.current : ''}`
+            : `完成：${f.done || 0}/${f.total || 0} 个媒体库${f.failed ? '，失败 ' + f.failed : ''}`;
+        }
+        if (tries >= 24 || !(state.status && state.status.full && state.status.full.running)) clearInterval(timer);
+      }, 3000);
+    } catch (err) {
+      toast(err.message, 'bad');
+      if (out) out.textContent = err.message || '启动失败';
+    }
+  }
+
+  function bindCombos() {
+    $$('.combo').forEach((box) => {
+      if (box.dataset.bound) return;
+      box.dataset.bound = '1';
+      const input = box.querySelector('input');
+      const mark = () => {
+        const v = String(Number(input.value));
+        box.querySelectorAll('.combo-menu button').forEach((b) => b.classList.toggle('on', b.dataset.value === v));
+      };
+      const open = () => {
+        $$('.combo.open').forEach((b) => { if (b !== box) b.classList.remove('open'); });
+        mark();
+        box.classList.add('open');
+      };
+      const close = () => box.classList.remove('open');
+      input.addEventListener('click', open);
+      input.addEventListener('focus', open);
+      box.querySelector('.combo-arrow').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (box.classList.contains('open')) close(); else open();
+      });
+      box.querySelectorAll('.combo-menu button').forEach((b) => {
+        b.addEventListener('mousedown', (e) => e.preventDefault());
+        b.addEventListener('click', () => {
+          input.value = b.dataset.value;
+          close();
+          input.dispatchEvent(new Event('change'));
+        });
+      });
+    });
   }
 
   function bindSettings() {
@@ -578,26 +844,35 @@
       try {
         const res = await api('/api/115/cookie/test', { method: 'POST', body: { cookie } });
         const d = res.data || {};
-        out.textContent = `Cookie 可用，最近文件 ${d.count || 0} 条`
-          + (d.sample && d.sample.name ? `（最新：${d.sample.name}）` : '')
+        out.textContent = `Cookie 可用：最近文件 ${d.count || 0} 条`
+          + (d.events != null ? ` · 操作事件 ${d.events} 条` : '')
+          + (d.events_error ? `（事件接口：${d.events_error}）` : '')
+          + (d.sample && d.sample.name ? ` · 最新：${d.sample.name}` : '')
           + (d.path ? ` → ${d.path}` : '');
       } catch (err) {
         out.textContent = err.message || 'Cookie 测试失败';
       }
     });
-    $('#btn-recent-run').addEventListener('click', async () => {
-      const out = $('#recent-run-result');
-      out.textContent = '检查中…';
-      try {
-        const res = await api('/api/115/recent/run', { method: 'POST', body: {} });
-        const d = res.data || {};
-        out.textContent = `检查 ${d.checked || 0} 条 / 新视频 ${d.new || 0} / 入队 ${d.queued || 0}` + (d.first_run ? '（首次只记录）' : '');
-        loadAll(true);
-      } catch (err) {
-        out.textContent = err.message || '检查失败';
-      }
-    });
     $('#btn-copy-hook').addEventListener('click', () => copyText($('#cfg-webhook').value));
+    const copyEmby = $('#btn-copy-emby');
+    if (copyEmby) copyEmby.addEventListener('click', () => copyText($('#cfg-emby-url').value));
+    const eventsRun = $('#btn-events-run');
+    if (eventsRun) eventsRun.addEventListener('click', () => runEvents(eventsRun, $('#events-run-result')));
+    const fullBtn = $('#btn-full-run-settings');
+    if (fullBtn) fullBtn.addEventListener('click', () => runFull($('#full-run-result')));
+    const notifyBtn = $('#btn-notify-test');
+    if (notifyBtn) notifyBtn.addEventListener('click', async () => {
+      const out = $('#notify-test-result');
+      out.textContent = '发送中…';
+      try {
+        await api('/api/notify/test', { method: 'POST', body: {} });
+        out.textContent = '已发送，去企业微信看看';
+        toast('测试消息已发送', 'ok');
+      } catch (err) { out.textContent = err.message || '发送失败'; }
+    });
+    bindCombos();
+    $$('[data-theme-seg] button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.mode)));
+    applyTheme(themeMode(), false);
     $('#btn-change-pass').addEventListener('click', async () => {
       const old = $('#cfg-old-pass').value;
       const nw = $('#cfg-new-pass').value;
@@ -666,10 +941,31 @@
     c.scan.max_depth = Number(val('cfg-depth')) || 4;
     c.scan.min_size_mb = Number(val('cfg-minsize')) || 20;
 
-    c.u115.recent_enabled = checked('cfg-recent-enabled');
-    c.u115.recent_first_scan = checked('cfg-recent-first');
-    c.u115.recent_interval = Number(val('cfg-recent-interval')) || 120;
-    c.u115.recent_limit = Number(val('cfg-recent-limit')) || 50;
+    c.scan.full_enabled = checked('cfg-full-enabled');
+    c.scan.full_on_start = checked('cfg-full-start');
+    if (val('cfg-full-time')) c.scan.full_time = val('cfg-full-time');
+
+    c.events.enabled = checked('cfg-events-enabled');
+    c.events.first_scan = checked('cfg-events-first');
+    c.events.verify_enabled = checked('cfg-events-verify');
+    c.events.recent_fallback = checked('cfg-events-recent');
+    c.events.interval = Number(val('cfg-events-interval')) || 60;
+    c.events.settle_seconds = Number(val('cfg-events-settle')) || 120;
+    c.events.max_wait_seconds = Number(val('cfg-events-maxwait')) || 900;
+    c.events.verify_delay = Number(val('cfg-events-verify-delay')) || 300;
+    c.events.limit = Number(val('cfg-events-limit')) || 100;
+
+    c.notify.wecom_enabled = checked('cfg-wecom-enabled');
+    c.notify.wecom_corpid = val('cfg-wecom-corpid');
+    c.notify.wecom_agentid = val('cfg-wecom-agentid');
+    if (val('cfg-wecom-secret')) c.notify.wecom_secret = val('cfg-wecom-secret');
+    c.notify.wecom_touser = val('cfg-wecom-touser') || '@all';
+    c.notify.wecom_proxy = val('cfg-wecom-proxy');
+    c.notify.on_scan = checked('cfg-notify-scan');
+    c.notify.on_full = checked('cfg-notify-full');
+    c.notify.on_error = checked('cfg-notify-error');
+
+    c.u115.recent_enabled = c.events.recent_fallback;
     if (val('cfg-115-cookie')) c.u115.cookie = val('cfg-115-cookie');
 
     c.server.public_url = val('cfg-public-url');
@@ -764,18 +1060,38 @@
 
   // ------------------------------------------------------------------ 事件
   function bind() {
-    $$('.nav a').forEach((a) => a.addEventListener('click', (e) => {
+    $$('.nav a, .tabbar a').forEach((a) => a.addEventListener('click', (e) => {
       e.preventDefault();
       switchTab(a.dataset.tab);
     }));
     window.addEventListener('hashchange', () => switchTab((location.hash || '#overview').slice(1)));
 
     $('#btn-refresh-all').addEventListener('click', () => { loadAll(); toast('正在刷新', 'ok'); });
-    $('#btn-logout').addEventListener('click', async () => {
+    const logout = async () => {
       await api('/api/logout', { method: 'POST', body: {} }).catch(() => {});
       location.href = '/login';
+    };
+    $('#btn-logout').addEventListener('click', logout);
+    const logoutMobile = $('#btn-logout-mobile');
+    if (logoutMobile) logoutMobile.addEventListener('click', logout);
+
+    $$('[data-theme-toggle]').forEach((b) => b.addEventListener('click', cycleTheme));
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.combo')) $$('.combo.open').forEach((b) => b.classList.remove('open'));
     });
+    if (window.matchMedia) {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const onChange = () => { if (themeMode() === 'auto') applyTheme('auto', false); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+
     $('#btn-hero-scan').addEventListener('click', scanDialog);
+    $('#btn-hero-full').addEventListener('click', () => runFull(null));
+    $('#btn-events-run').addEventListener('click', (e) => runEvents(e.currentTarget, null));
+    $('#btn-events-run-2').addEventListener('click', (e) => runEvents(e.currentTarget, null));
+    $('#btn-full-run').addEventListener('click', () => runFull(null));
+    $('#btn-full-run-2').addEventListener('click', () => runFull(null));
     $('#btn-hero-test').addEventListener('click', () => { switchTab('settings'); setTimeout(() => $('#cfg-test-path') && $('#cfg-test-path').focus(), 80); });
     $('#btn-reload-libs').addEventListener('click', async () => {
       try {
@@ -807,6 +1123,7 @@
   }
 
   async function boot() {
+    applyTheme(themeMode(), false);
     bind();
     const tab = (location.hash || '#overview').slice(1);
     switchTab(tab);

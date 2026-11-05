@@ -184,16 +184,21 @@ def search_file(filename: str, token: str | None = None) -> Optional[str]:
     return None
 
 
-def refresh_section(section_id: str, path: str) -> None:
-    """Plex 官方局部扫描：/library/sections/{id}/refresh?path=..."""
+def refresh_section(section_id: str, path: Optional[str] = None) -> None:
+    """Plex 官方扫描。
+
+    带 path：只扫这个目录（局部扫描）。
+    不带 path：整库扫描（全量同步用）。
+    """
+    params = {"path": path} if path else None
     resp = request(
         "GET",
         f"/library/sections/{section_id}/refresh",
-        params={"path": path},
+        params=params,
         timeout=20,
     )
     if resp.status_code not in (200, 204):
-        raise PlexError(f"Plex 局部扫描返回 HTTP {resp.status_code}")
+        raise PlexError(f"Plex 扫描返回 HTTP {resp.status_code}")
 
 
 def section_for_path(path: str, secs: List[Dict[str, Any]] | None = None) -> Optional[Dict[str, Any]]:

@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Plex302 · 云盘直链助手</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <script>
+    // 主题要在 CSS 之前定下来，避免刷新时闪一下白/黑
+    (function () {
+      try {
+        var mode = localStorage.getItem('p302-theme') || 'auto';
+        var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = mode === 'auto' ? (dark ? 'dark' : 'light') : mode;
+        document.documentElement.dataset.themeMode = mode;
+      } catch (e) { /* ignore */ }
+    })();
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -23,6 +34,14 @@
   <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12.5 5 5L20 6.5"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
   <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20v.01M20 20v.01"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor" stroke="none" opacity=".25"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10.5 20a2 2 0 0 0 3 0"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+  <symbol id="i-events" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
 </svg>
 
 <div class="layout">
@@ -39,8 +58,12 @@
       <a href="#logs" data-tab="logs"><svg><use href="#i-logs"></use></svg>日志</a>
     </nav>
     <div class="side-foot">
-      <div id="side-version">v1.0.0</div>
+      <div id="side-version">v1.2.0</div>
       <a href="https://github.com/celestial520/plex302" target="_blank" rel="noreferrer">GitHub · 使用说明</a>
+    </div>
+    <div class="mobile-actions">
+      <button class="btn ghost sm" data-theme-toggle title="切换主题"><svg><use href="#i-auto"></use></svg></button>
+      <button class="btn ghost sm" id="btn-logout-mobile">退出</button>
     </div>
   </aside>
 
@@ -54,20 +77,24 @@
         <span class="pill" id="pill-plex"><i class="dot"></i>Plex</span>
         <span class="pill" id="pill-115"><i class="dot"></i>115</span>
         <span class="pill" id="pill-cd2"><i class="dot"></i>CD2</span>
+        <div class="wrap desktop-only">
+          <button class="btn ghost sm" data-theme-toggle title="切换主题"><svg><use href="#i-auto"></use></svg>外观</button>
+        </div>
         <button class="btn ghost sm" id="btn-refresh-all"><svg><use href="#i-refresh"></use></svg>刷新</button>
-        <button class="btn ghost sm" id="btn-logout">退出</button>
+        <button class="btn ghost sm desktop-only" id="btn-logout">退出</button>
       </div>
     </header>
 
     <section class="view active" id="view-overview">
       <div class="hero">
         <div>
-          <div class="hero-badge">DIRECT PLAY · 302</div>
+          <div class="hero-badge">DIRECT PLAY · 302 · 增量入库</div>
           <h2>外网播放，不再经过 NAS 中转</h2>
-          <p>Plex 通过 CD2 挂载扫描入库；外网客户端起播时，服务把 <code>/library/parts</code> 请求 302 到云盘直链。局域网仍然回源 Plex，转码和字幕都不受影响。</p>
+          <p>Plex 通过 CD2 挂载扫描入库；外网客户端起播时，服务把 <code>/library/parts</code> 请求 302 到云盘直链。局域网仍然回源 Plex，转码和字幕都不受影响。CMS 整理完由 115 操作事件触发局部扫描，每天再全库扫一遍兜底。</p>
         </div>
         <div class="hero-actions">
-          <button class="btn primary" id="btn-hero-scan"><svg><use href="#i-scan"></use></svg>扫描一个路径</button>
+          <button class="btn primary" id="btn-hero-scan"><svg><use href="#i-scan"></use></svg>扫描路径</button>
+          <button class="btn" id="btn-hero-full"><svg><use href="#i-full"></use></svg>全量同步</button>
           <button class="btn" id="btn-hero-test"><svg><use href="#i-link"></use></svg>测试直链</button>
         </div>
       </div>
@@ -89,9 +116,9 @@
           <div class="sub">CMS / 监听 / 手动</div>
         </div>
         <div class="stat">
-          <div class="label">目录监听</div>
-          <div class="value" id="stat-watch">—</div>
-          <div class="sub" id="stat-watch-sub">等待首轮索引</div>
+          <div class="label">待扫目录</div>
+          <div class="value" id="stat-pending">0</div>
+          <div class="sub" id="stat-pending-sub">事件静置中</div>
         </div>
       </div>
 
@@ -108,10 +135,32 @@
           <div class="panel-head"><h3>最近扫描</h3><a class="hint" href="#scans">查看全部 →</a></div>
           <div class="panel-body" style="padding-top:2px">
             <div class="table-wrap">
-              <table>
+              <table class="responsive">
                 <thead><tr><th>时间</th><th>路径</th><th>状态</th></tr></thead>
                 <tbody id="recent-scans"><tr><td colspan="3"><div class="empty">暂无记录</div></td></tr></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head">
+            <div><h3>115 最近操作</h3><span class="hint">App 里的上传 / 移动 / 改名 / 复制 / 删除</span></div>
+            <button class="btn ghost sm" id="btn-events-run"><svg><use href="#i-refresh"></use></svg>立即检查</button>
+          </div>
+          <div class="panel-body" style="padding-top:2px">
+            <div class="event-list" id="event-list"><div class="empty">加载中…</div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>全量同步</h3><span class="hint">Plex 全部媒体库整库扫描</span></div>
+          <div class="panel-body">
+            <div id="full-status"><div class="empty">还没有跑过全量同步</div></div>
+            <button class="btn block" id="btn-full-run" style="margin-top:12px"><svg><use href="#i-full"></use></svg>立即全量扫描</button>
+            <div class="desc" style="margin-top:8px;font-size:11px;color:var(--muted-2);line-height:1.6">
+              建议每天凌晨自动跑一次（设置 → 全量同步）。增量漏了，这一步也能补回来。
             </div>
           </div>
         </div>
@@ -128,7 +177,7 @@
         </div>
         <div class="panel-body" style="padding-top:0">
           <div class="table-wrap">
-            <table>
+            <table class="responsive">
               <thead><tr><th>媒体库</th><th>类型</th><th>Plex 路径</th><th>影片数</th><th>自动监听</th><th>操作</th></tr></thead>
               <tbody id="lib-body"><tr><td colspan="6"><div class="empty">加载中…</div></td></tr></tbody>
             </table>
@@ -144,15 +193,17 @@
     <section class="view" id="view-scans">
       <div class="panel">
         <div class="panel-head">
-          <div><h3>扫描记录</h3><span class="hint">最近 50 条；来源包括 manual / cms / watch</span></div>
-          <div style="display:flex;gap:8px">
-            <button class="btn sm" id="btn-run-watch"><svg><use href="#i-scan"></use></svg>立即执行监听</button>
+          <div><h3>扫描记录</h3><span class="hint">局部扫描 + 全量同步；来源 manual / cms / 115event / verify / schedule</span></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn sm" id="btn-events-run-2"><svg><use href="#i-events"></use></svg>检查 115</button>
+            <button class="btn sm" id="btn-full-run-2"><svg><use href="#i-full"></use></svg>全量同步</button>
+            <button class="btn sm" id="btn-run-watch"><svg><use href="#i-scan"></use></svg>目录监听</button>
             <button class="btn sm" id="btn-scan-refresh"><svg><use href="#i-refresh"></use></svg>刷新</button>
           </div>
         </div>
         <div class="panel-body" style="padding-top:0">
           <div class="table-wrap">
-            <table>
+            <table class="responsive">
               <thead><tr><th>时间</th><th>路径</th><th>媒体库</th><th>来源</th><th>状态</th><th>信息</th></tr></thead>
               <tbody id="scan-body"><tr><td colspan="6"><div class="empty">加载中…</div></td></tr></tbody>
             </table>
@@ -186,6 +237,14 @@
     </section>
   </main>
 </div>
+
+<nav class="tabbar" id="tabbar">
+  <a href="#overview" data-tab="overview" class="active"><svg><use href="#i-home"></use></svg><span>概览</span></a>
+  <a href="#library" data-tab="library"><svg><use href="#i-library"></use></svg><span>媒体库</span></a>
+  <a href="#scans" data-tab="scans"><svg><use href="#i-scan"></use></svg><span>扫描</span></a>
+  <a href="#settings" data-tab="settings"><svg><use href="#i-settings"></use></svg><span>设置</span></a>
+  <a href="#logs" data-tab="logs"><svg><use href="#i-logs"></use></svg><span>日志</span></a>
+</nav>
 
 <div id="modal-root"></div>
 <div id="toast-root"></div>

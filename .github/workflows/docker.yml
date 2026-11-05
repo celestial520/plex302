@@ -39,6 +39,7 @@ jobs:
             --add-host host.docker.internal:host-gateway \
             -e TZ=Asia/Shanghai \
             -e P115_WEBAPI_BASE=http://host.docker.internal:32403 \
+            -e P115_EVENT_BASE=http://host.docker.internal:32403 \
             -e NGINX_PORT=32500 \
             -e WEBUI_PORT=999 \
             -p 32500:32500 -p 999:999 \
@@ -104,6 +105,12 @@ jobs:
           cfg["mounts"] = [{"name": "CD2", "plex_prefix": "/mnt/cd2/115", "cloud_prefix": "/", "cd2_prefix": ""}]
           cfg["u115"]["cookie"] = "UID=ci; CID=ci; SEID=ci"
           cfg["u115"]["recent_limit"] = 20
+          # 测试里把静置时间压到 0，否则要等两分钟才能看到入队；
+          # 后台轮询间隔拉长到 1 小时，避免它和手动触发抢事件影响断言
+          cfg["events"]["interval"] = 3600
+          cfg["events"]["settle_seconds"] = 0
+          cfg["events"]["verify_enabled"] = False
+          cfg["scan"]["full_on_start"] = False
           json.dump(cfg, open("cfg2.json", "w"))
           PY
 
@@ -124,33 +131,64 @@ jobs:
           echo "内网状态码=$code"
           [ "$code" = "200" ] || { echo "::error::内网应回源 200"; exit 1; }
 
-          echo "--- 115 最近文件 -> 局部入库 ---"
+          echo "--- 115 操作事件 -> 增量入库 ---"
           python3 tests/mock_115.py --host 0.0.0.0 --port 32403 > /tmp/mock115.log 2>&1 &
           sleep 2
           cat /tmp/mock115.log
           mock=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Cookie: UID=ci; SEID=ci' \
-            'http://127.0.0.1:32403/files/recent?limit=1')
+            'http://127.0.0.1:32403/behavior/detail?limit=1')
           echo "mock 115 HTTP=$mock"
           [ "$mock" = "200" ] || { echo "::error::假 115 没起来"; exit 1; }
 
-          # 第一轮：只记录，不扫描
-          first=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:999/api/115/recent/run)
+          # 第一轮：建立游标（首次运行只记录，不补扫历史）
+          first=$(curl -s -m 30 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:999/api/115/events/run)
           echo "第一轮 $first"
+          echo "$first" | grep -q '"queued": *0' || { echo "::error::首次运行不应立刻入队扫描"; exit 1; }
 
+          # 造一条“上传电视剧文件”的事件（parent 2002 = /电视剧/测试剧）
           curl -s -m 5 -X POST -H 'Content-Type: application/json' \
-            -d "{\"file_id\":\"9100\",\"file_name\":\"S01E01.mkv\",\"parent_id\":\"2002\",\"pick_code\":\"ci1\",\"file_size\":104857600,\"sha1\":\"cisha1\",\"ctime\":$(( $(date +%s) - 120 ))}" \
-            http://127.0.0.1:32403/add > /dev/null
+            -d '{"id":"1001","type":2,"file_id":"9100","file_name":"S01E01.mkv","parent_id":"2002","sha1":"cisha1","file_size":104857600}' \
+            http://127.0.0.1:32403/add_event > /dev/null
 
-          # 第二轮：应该入队扫描
-          second=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:999/api/115/recent/run)
+          # 第二轮：事件被消费 -> 静置 0 秒 -> 立刻入队
+          second=$(curl -s -m 30 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:999/api/115/events/run)
           echo "第二轮 $second"
-          echo "$second" | grep -q '"queued":1' || { echo "::error::115 最近文件没有入队扫描"; exit 1; }
+          echo "$second" | grep -q '"queued": *1' || { echo "::error::115 操作事件没有入队扫描"; exit 1; }
+
+          # 第三轮：游标已推进，不应重复入队
+          third=$(curl -s -m 30 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:999/api/115/events/run)
+          echo "第三轮 $third"
+          echo "$third" | grep -q '"new": *0' || { echo "::error::游标没有推进，事件被重复消费"; exit 1; }
+          echo "$third" | grep -q '"queued": *0' || { echo "::error::重复事件又被扫了一次"; exit 1; }
 
           sleep 3
-          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/scan/history?limit=5' | grep -q '115recent' \
-            || { echo "::error::扫描记录里没有 115recent 来源"; exit 1; }
+          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/scan/history?limit=5' | grep -q '115event' \
+            || { echo "::error::扫描记录里没有 115event 来源"; exit 1; }
+
+          echo "--- 全量同步：Plex 整库扫描 ---"
+          full=$(curl -s -m 60 -b cookie.txt -X POST http://127.0.0.1:999/api/sync/full)
+          echo "触发 $full"
+          for i in $(seq 1 20); do
+            body=$(curl -s -m 10 -b cookie.txt http://127.0.0.1:999/api/sync/full)
+            echo "第 ${i} 次查询 $body"
+            echo "$body" | grep -q '"running": *false' && break
+            sleep 3
+          done
+          echo "$body" | grep -q '"done": *2' || { echo "::error::全量同步没有扫完两个媒体库"; exit 1; }
+
+          echo "--- CMS 对接：Emby 兼容入口 ---"
+          key=$(curl -s -b cookie.txt http://127.0.0.1:999/api/status | python3 -c 'import sys,json,urllib.parse;print(urllib.parse.parse_qs(urllib.parse.urlparse(json.load(sys.stdin)["data"]["emby_url"]).query)["api_key"][0])')
+          echo "emby api_key=$key"
+          noauth=$(curl -s -o /dev/null -w '%{http_code}' -m 10 http://127.0.0.1:999/emby/System/Info)
+          info=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:999/emby/System/Info?api_key=$key")
+          refresh=$(curl -s -o /dev/null -w '%{http_code}' -m 20 -X POST "http://127.0.0.1:999/emby/Library/Refresh?api_key=$key")
+          echo "无 token=$noauth 有 token=$info 刷新=$refresh"
+          [ "$noauth" = "401" ] || { echo "::error::Emby 入口没有校验 api_key"; exit 1; }
+          [ "$info" = "200" ] || { echo "::error::Emby System/Info 不通"; exit 1; }
+          [ "$refresh" = "204" ] || { echo "::error::Emby Library/Refresh 应返回 204"; exit 1; }
 
       - name: 输出日志
         if: always()

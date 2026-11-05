@@ -1,9 +1,11 @@
-"""假 115 网页接口，用来测「最近文件监听」。
+"""假 115 网页接口，用来测「生活事件 + 最近文件」两条链路。
 
 python3 tests/mock_115.py --port 32403
-  GET /files/recent?limit=N   最近变动
-  GET /files?cid=<cid>        目录 path 链路
-  POST /add                   测试时动态加一条“新文件”
+  GET  /behavior/detail?limit&offset   生活事件（操作流水，倒序）
+  GET  /files/recent?limit=N           最近变动
+  GET  /files?cid=<cid>                目录 path 链路
+  POST /add                            加一条“最近文件”
+  POST /add_event                      加一条操作事件
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 LOCK = threading.Lock()
 STATE = {
@@ -25,6 +27,22 @@ STATE = {
             "file_size": 5 * 1024 * 1024,
             "sha1": "oldsha",
             "ctime": int(time.time()) - 3600,
+        }
+    ],
+    # 事件按 id 递增插入；返回时倒序
+    "events": [
+        {
+            "id": "1000",
+            "type": 2,
+            "file_id": "9001",
+            "file_name": "旧片.mkv",
+            "file_category": "1",
+            "file_size": 5 * 1024 * 1024,
+            "parent_id": "2001",
+            "sha1": "oldsha",
+            "pick_code": "old",
+            "update_time": int(time.time()) - 3600,
+            "create_time": int(time.time()) - 3600,
         }
     ],
     "paths": {
@@ -52,18 +70,30 @@ class Handler(BaseHTTPRequestHandler):
         cookie = self.headers.get("Cookie", "")
         return "UID=" in cookie and "SEID=" in cookie
 
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(raw or b"{}")
+        except ValueError:
+            return {}
+
     def do_POST(self):  # noqa: N802
         path = urlparse(self.path).path
         if path == "/add":
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length else b"{}"
-            try:
-                item = json.loads(raw or b"{}")
-            except ValueError:
-                item = {}
+            item = self._read_json()
             with LOCK:
                 STATE["recent"].insert(0, item)
             return self._json({"state": True, "count": len(STATE["recent"])})
+        if path == "/add_event":
+            item = self._read_json()
+            item.setdefault("id", str(2000 + len(STATE["events"])))
+            item.setdefault("update_time", int(time.time()))
+            item.setdefault("create_time", item["update_time"])
+            item.setdefault("file_category", "1" if not item.get("is_dir") else "0")
+            with LOCK:
+                STATE["events"].append(item)
+            return self._json({"state": True, "count": len(STATE["events"])})
         self._json({"state": False, "error": "not found"}, 404)
 
     def do_GET(self):  # noqa: N802
@@ -79,6 +109,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/behavior/detail":
+            limit = int((query.get("limit") or ["100"])[0])
+            offset = int((query.get("offset") or ["0"])[0])
+            with LOCK:
+                items = sorted(STATE["events"], key=lambda x: int(x.get("id") or 0), reverse=True)
+            page = items[offset: offset + limit]
+            return self._json({"state": True, "data": {"list": page, "count": len(items)}})
         if path == "/files/recent":
             limit = int((query.get("limit") or ["50"])[0])
             with LOCK:

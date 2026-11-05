@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, cd2, config, logger, plex, recent, resolver, scanner, store, u115, u115web, watcher
+from . import auth, cd2, config, events, logger, notify, plex, resolver, scanner, scheduler, store, u115, u115events, u115web, watcher
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook"}
 
@@ -33,9 +33,13 @@ async def lifespan(app: FastAPI):
         logger.warn("WebUI 初始账号 admin/admin，请登录后立即修改密码")
     await scanner.scanner.start()
     await watcher.watcher.start()
-    await recent.recent_watcher.start()
+    await events.event_watcher.start()
+    await scheduler.scheduler.start()
+    notify_task = asyncio.create_task(notify.flush_loop(), name="notify-flush")
     yield
-    await recent.recent_watcher.stop()
+    notify_task.cancel()
+    await scheduler.scheduler.stop()
+    await events.event_watcher.stop()
     await watcher.watcher.stop()
     await scanner.scanner.stop()
     logger.info("Plex302 已停止")
@@ -47,7 +51,7 @@ app = FastAPI(title="Plex302", version=VERSION, lifespan=lifespan, docs_url=None
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    if path in PUBLIC_PATHS or path.startswith("/static/"):
+    if path in PUBLIC_PATHS or path.startswith("/static/") or path.startswith("/emby/"):
         return await call_next(request)
     cfg = config.load()
     if auth.check_session(cfg, request.cookies.get(auth.COOKIE_NAME)):
@@ -174,7 +178,14 @@ async def api_status(request: Request) -> Any:
             "provider": cfg["provider"]["type"],
             "mounts": len(cfg["mounts"]),
             "watch": watcher.watcher.last_summary,
-            "recent": {**recent.recent_watcher.status(), "cookie_set": bool(cfg["u115"].get("cookie"))},
+            "events": {
+                **events.event_watcher.status(),
+                "cookie_set": bool(cfg["u115"].get("cookie")),
+                "enabled": cfg["events"]["enabled"],
+                "interval": cfg["events"]["interval"],
+            },
+            "full": scanner.scanner.full_status(),
+            "notify": {"wecom": bool(cfg["notify"]["wecom_enabled"])},
             "scanner_pending": scanner.scanner.pending(),
             "stats": {
                 "today": today_stat,
@@ -183,6 +194,7 @@ async def api_status(request: Request) -> Any:
             },
             "default_password": auth.default_password_active(cfg),
             "webhook_url": _webhook_url(request, cfg),
+            "emby_url": _emby_url(request, cfg),
         }
     )
 
@@ -190,6 +202,11 @@ async def api_status(request: Request) -> Any:
 def _webhook_url(request: Request, cfg: Dict[str, Any]) -> str:
     base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
     return f"{base}/api/hook?token={cfg['security']['webhook_token']}"
+
+
+def _emby_url(request: Request, cfg: Dict[str, Any]) -> str:
+    base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
+    return f"{base}/emby?api_key={cfg['security']['emby_token']}"
 
 
 # --------------------------------------------------------------------- 配置
@@ -374,6 +391,14 @@ async def api_hook(request: Request) -> Any:
         value = request.query_params.get(key)
         if value:
             paths.append(value)
+    # 支持 ?full=1 或 {"full":true}：不传路径，直接全量扫一遍
+    full_flag = str(request.query_params.get("full") or "").lower() in ("1", "true", "yes", "all")
+    if isinstance(payload, dict) and str(payload.get("full") or "").lower() in ("1", "true", "yes", "all"):
+        full_flag = True
+    if full_flag and not paths:
+        result = await scanner.scanner.submit_full(source="cms")
+        logger.info(f"[CMS] 收到全量同步通知：{result}")
+        return _ok({"full": True, **result})
     paths = [p for p in dict.fromkeys(paths) if p and p.startswith("/")]
     if not paths:
         return _err("没有从请求里找到绝对路径（可用 ?path=/电影/xxx 或 JSON {\"path\":\"...\"}）")
@@ -464,7 +489,7 @@ async def api_115_logout() -> Any:
     return _ok()
 
 
-# ------------------------------------------------------- 115 网页 Cookie / 最近文件
+# ------------------------------------------------------- 115 网页 Cookie / 操作事件
 @app.post("/api/115/cookie/test")
 async def api_115_cookie_test(request: Request) -> Any:
     try:
@@ -479,20 +504,132 @@ async def api_115_cookie_test(request: Request) -> Any:
         result = await asyncio.to_thread(u115web.test, cfg)
     except u115web.Web115Error as err:
         return _err(str(err))
+    # 顺带验证生活事件接口（真正的增量来源）
+    try:
+        ev = await asyncio.to_thread(u115events.test, cfg, 5)
+        result["events"] = ev["count"]
+        result["event_sample"] = ev.get("sample")
+    except u115web.Web115Error as err:
+        result["events_error"] = str(err)
     return _ok(result)
 
 
-@app.post("/api/115/recent/run")
-async def api_115_recent_run() -> Any:
-    summary = await recent.recent_watcher.run_once(force=True)
+@app.post("/api/115/events/run")
+async def api_115_events_run() -> Any:
+    summary = await events.event_watcher.run_once(force=True)
     if summary.get("ok") is False:
-        return _err(summary.get("error") or "拉取 115 最近文件失败")
+        return _err(summary.get("error") or "拉取 115 操作记录失败")
     return _ok(summary)
 
 
-@app.get("/api/115/recent/events")
-async def api_115_recent_events(limit: int = 20) -> Any:
-    return _ok(store.recent_events(max(1, min(int(limit), 200))))
+@app.get("/api/115/events")
+async def api_115_events(limit: int = 30) -> Any:
+    return _ok(store.events(max(1, min(int(limit), 200))))
+
+
+@app.get("/api/115/events/summary")
+async def api_115_events_summary() -> Any:
+    return _ok(events.event_watcher.status())
+
+
+# ------------------------------------------------------- 全量同步
+@app.post("/api/sync/full")
+async def api_sync_full() -> Any:
+    result = await scanner.scanner.submit_full(source="manual")
+    if not result.get("ok"):
+        return _err(result.get("error") or "全量同步启动失败")
+    logger.info("[全量] 手动触发全量同步")
+    return _ok(result)
+
+
+@app.get("/api/sync/full")
+async def api_sync_full_status() -> Any:
+    return _ok(scanner.scanner.full_status())
+
+
+# ------------------------------------------------------- 通知
+@app.post("/api/notify/test")
+async def api_notify_test() -> Any:
+    result = await asyncio.to_thread(notify.test)
+    if not result.get("ok"):
+        return _err(result.get("error") or "发送失败")
+    return _ok({"sent": True})
+
+
+# ------------------------------------------------------- CMS 兼容入口（Emby）
+def _emby_token(request: Request) -> str:
+    return str(
+        request.query_params.get("api_key")
+        or request.headers.get("X-Emby-Token")
+        or request.headers.get("X-MediaBrowser-Token")
+        or ""
+    )
+
+
+def _emby_ok(request: Request, cfg: Dict[str, Any]) -> bool:
+    token = _emby_token(request)
+    return bool(token) and token in (cfg["security"]["emby_token"], cfg["security"]["webhook_token"])
+
+
+@app.get("/emby/System/Info")
+@app.get("/emby/System/Info/Public")
+async def emby_system_info(request: Request) -> Any:
+    cfg = config.load()
+    if not _emby_ok(request, cfg):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {
+        "ServerName": cfg["server"].get("name") or "Plex302",
+        "Version": "4.8.0.0",
+        "ProductName": "Plex302",
+        "Id": cfg["security"]["secret"][:32],
+        "OperatingSystem": "Linux",
+        "StartupWizardCompleted": True,
+    }
+
+
+@app.post("/emby/Library/Refresh")
+@app.post("/emby/Library/Sections/{section_id}/Refresh")
+async def emby_library_refresh(request: Request, section_id: str = "") -> Any:
+    """CMS 的「通知 Emby 扫库」直接打到这里，转成 Plex 扫描。
+
+    CMS 里把 EMBY_HOST_PORT 指向本容器 WebUI 端口、EMBY_API_KEY 填 emby_token，
+    整理完就会自动触发；不用再额外装 webhook 插件。
+    """
+    cfg = config.load()
+    if not _emby_ok(request, cfg):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if section_id:
+        try:
+            sections = await asyncio.to_thread(plex.sections)
+        except plex.PlexError as err:
+            return JSONResponse({"error": str(err)}, status_code=502)
+        target = next((s for s in sections if s["key"] == str(section_id)), None)
+        if target:
+            logger.info(f"[CMS] Emby 兼容通知：扫描媒体库 {target['title']}")
+            await scanner.scanner.submit(
+                (target.get("locations") or [target["title"]])[0],
+                target["key"],
+                source="cms-emby",
+                force=True,
+            )
+        return Response(status_code=204)
+    logger.info("[CMS] Emby 兼容通知：触发全量同步")
+    await scanner.scanner.submit_full(source="cms-emby")
+    return Response(status_code=204)
+
+
+@app.post("/emby/Items/{item_id}/Refresh")
+async def emby_item_refresh(request: Request, item_id: str) -> Any:
+    cfg = config.load()
+    if not _emby_ok(request, cfg):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # 拿不到 Emby 的 item -> 路径映射，退化成「10 分钟内只触发一次全量」
+    last = float(store.state_get("emby_item_full_at", "0") or 0)
+    if time.time() - last > 600:
+        store.state_set("emby_item_full_at", str(time.time()))
+        logger.info(f"[CMS] Emby 兼容通知（item {item_id}）：触发全量同步")
+        await scanner.scanner.submit_full(source="cms-emby")
+    return Response(status_code=204)
 
 
 # --------------------------------------------------------------------- 日志
