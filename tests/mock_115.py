@@ -135,7 +135,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         path = urlparse(self.path).path
-        if not self._authorized():
+        # /add 与 /add_event 是测试辅助接口，真实 115 没有，不校验 Cookie
+        if not self._authorized() and path not in ("/add", "/add_event"):
             body = b"<html>405</html>"
             self.send_response(405)
             self.send_header("Content-Type", "text/html")
