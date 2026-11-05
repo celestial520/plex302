@@ -224,6 +224,50 @@ jobs:
           [ "$info" = "200" ] || { echo "::error::Emby System/Info 不通"; exit 1; }
           [ "$refresh" = "204" ] || { echo "::error::Emby Library/Refresh 应返回 204"; exit 1; }
 
+          echo "--- 自建整理（假 TMDB + 假 115 写接口） ---"
+          python3 tests/mock_tmdb.py --host 0.0.0.0 --port 32404 > /tmp/mocktmdb.log 2>&1 &
+          sleep 2
+          curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
+          GW="$GW" python3 - <<'PY'
+          import json, os
+          cfg = json.load(open("cfg.json"))["data"]
+          cfg["organize"].update({
+              "enabled": True, "dry_run": True, "source_dirs": ["/待整理"],
+              "movie_dir": "/媒体/电影", "tv_dir": "/媒体/剧集",
+              "min_size_mb": 0, "depth": 2, "delay": 0,
+          })
+          cfg["metadata"]["tmdb_key"] = "test"
+          cfg["metadata"]["tmdb_base"] = f"http://{os.environ['GW']}:32404/3"
+          json.dump(cfg, open("cfg2.json", "w"))
+          PY
+          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            --data-binary @cfg2.json http://127.0.0.1:999/api/config -o /dev/null
+
+          # 先预演：不能动文件
+          dry=$(curl -s -m 60 -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            -d '{"dry_run":true}' http://127.0.0.1:999/api/organize/run)
+          echo "预演 $dry"
+          echo "$dry" | grep -q '"planned": *2' || { echo "::error::预演没有规划出两个文件"; exit 1; }
+          echo "$dry" | grep -q '"done": *0' || { echo "::error::预演不应真的移动文件"; exit 1; }
+
+          # 再执行
+          org=$(curl -s -m 120 -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            -d '{"dry_run":false}' http://127.0.0.1:999/api/organize/run)
+          echo "执行 $org"
+          echo "$org" | grep -q '"done": *2' || { echo "::error::整理没有完成两个文件"; exit 1; }
+          movie=$(curl -s -m 20 -b cookie.txt 'http://127.0.0.1:999/api/115/browse?path=/媒体/电影')
+          echo "电影目录 $movie"
+          echo "$movie" | grep -q '沙丘2 (2024)' || { echo "::error::电影没有归档到 /媒体/电影"; exit 1; }
+          tv=$(curl -s -m 20 -b cookie.txt 'http://127.0.0.1:999/api/115/browse?path=/媒体/剧集')
+          echo "剧集目录 $tv"
+          echo "$tv" | grep -q '三体 (2023)' || { echo "::error::剧集没有归档到 /媒体/剧集"; exit 1; }
+
+          echo "--- 企业微信回调验签 ---"
+          wc=$(curl -s -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:999/api/wecom/callback?msg_signature=bad&timestamp=1&nonce=n&echostr=e')
+          echo "错误签名=$wc"
+          [ "$wc" = "403" ] || { echo "::error::企业微信回调没有校验签名"; exit 1; }
+
       - name: 输出日志
         if: always()
         run: |

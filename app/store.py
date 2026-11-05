@@ -89,6 +89,19 @@ def _db() -> sqlite3.Connection:
             updated_at REAL
         )"""
     )
+    # 整理历史：预演/执行都记一条，方便回头核对“这个文件被弄到哪了”
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS organize (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT,
+            target TEXT,
+            status TEXT,
+            reason TEXT,
+            title TEXT,
+            year INTEGER,
+            created_at REAL
+        )"""
+    )
     # 老库补列：扫描类型（path=局部，full=全量）
     try:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(scans)").fetchall()}
@@ -314,3 +327,25 @@ def state_set(key: str, value: str) -> None:
 
 def db_path() -> Path:
     return config.CONFIG_DIR / "state.db"
+
+
+# ---------------------------------------------------------------- 整理历史
+def add_organize(source: str, target: str, status: str, reason: str, title: str = "", year: int = 0) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT INTO organize(source, target, status, reason, title, year, created_at) VALUES (?,?,?,?,?,?,?)",
+            (source, target, status, str(reason or "")[:500], title, int(year or 0), time.time()),
+        )
+        _db().commit()
+
+
+def organize_history(limit: int = 50) -> list[dict[str, Any]]:
+    with _lock:
+        rows = _db().execute("SELECT * FROM organize ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def organize_count() -> int:
+    with _lock:
+        row = _db().execute("SELECT COUNT(*) AS c FROM organize").fetchone()
+    return int(row["c"] if row else 0)

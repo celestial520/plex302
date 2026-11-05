@@ -13,13 +13,19 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, cd2, config, events, logger, notify, plex, resolver, scanner, scheduler, store, u115events, u115web, watcher
+from . import (
+    ai, auth, cd2, config, events, ingest, logger, notify, organize, plex, resolver,
+    scanner, scheduler, store, tmdb, u115events, u115ops, u115web, watcher, wecom,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
-PUBLIC_PATHS = {"/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook"}
+PUBLIC_PATHS = {
+    "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
+    "/api/wecom/callback",
+}
 
 
 @asynccontextmanager
@@ -188,6 +194,17 @@ async def api_status(request: Request) -> Any:
             },
             "full": scanner.scanner.full_status(),
             "notify": {"wecom": bool(cfg["notify"]["wecom_enabled"])},
+            "organize": {
+                "enabled": bool(cfg["organize"]["enabled"]),
+                "dry_run": bool(cfg["organize"]["dry_run"]),
+                "running": organize.organizer.running,
+                "summary": organize.organizer.last_summary,
+                "history": store.organize_count(),
+            },
+            "ingest": {
+                "enabled": bool(cfg["ingest"]["enabled"]),
+                "target": cfg["ingest"]["target_dir"],
+            },
             "scanner_pending": scanner.scanner.pending(),
             "stats": {
                 "today": today_stat,
@@ -197,6 +214,7 @@ async def api_status(request: Request) -> Any:
             "default_password": auth.default_password_active(cfg),
             "webhook_url": _webhook_url(request, cfg),
             "emby_url": _emby_url(request, cfg),
+            "wecom_callback": _wecom_url(request, cfg),
         }
     )
 
@@ -209,6 +227,11 @@ def _webhook_url(request: Request, cfg: Dict[str, Any]) -> str:
 def _emby_url(request: Request, cfg: Dict[str, Any]) -> str:
     base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
     return f"{base}/emby?api_key={cfg['security']['emby_token']}"
+
+
+def _wecom_url(request: Request, cfg: Dict[str, Any]) -> str:
+    base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
+    return f"{base}/api/wecom/callback"
 
 
 # --------------------------------------------------------------------- 配置
@@ -495,6 +518,114 @@ async def api_115_events(limit: int = 30) -> Any:
 @app.get("/api/115/events/summary")
 async def api_115_events_summary() -> Any:
     return _ok(events.event_watcher.status())
+
+
+# ------------------------------------------------------- 115 目录浏览（选整理目录用）
+@app.get("/api/115/browse")
+async def api_115_browse(path: str = "/") -> Any:
+    cfg = config.load()
+    if not u115web.has_cookie(cfg):
+        return _err("未配置 115 Cookie")
+    try:
+        cid = await asyncio.to_thread(u115ops.find_dir, cfg, path)
+        if not cid:
+            return _err(f"目录不存在：{path}")
+        items = await asyncio.to_thread(u115web.list_dir, cfg, cid, True)
+    except u115web.Web115Error as err:
+        return _err(str(err))
+    dirs = []
+    for item in items:
+        name = str(u115ops._pick(item, "n", "file_name", "name", default=""))  # noqa: SLF001
+        is_dir = bool(u115ops._pick(item, "is_dir", default=False)) or not str(  # noqa: SLF001
+            u115ops._pick(item, "pc", "pick_code", default="")  # noqa: SLF001
+        )
+        if name and is_dir:
+            dirs.append({"name": name, "path": path.rstrip("/") + "/" + name})
+    return _ok({"path": path, "dirs": sorted(dirs, key=lambda x: x["name"])[:300]})
+
+
+# ------------------------------------------------------- 整理
+@app.post("/api/organize/run")
+async def api_organize_run(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    dry = body.get("dry_run")
+    limit = int(body.get("limit") or 0)
+    try:
+        summary = await asyncio.to_thread(organize.organizer.run, None if dry is None else bool(dry), limit)
+    except organize.OrganizeError as err:
+        return _err(str(err))
+    except (u115web.Web115Error, tmdb.TmdbError, ai.AiError) as err:
+        return _err(str(err))
+    return _ok(summary)
+
+
+@app.get("/api/organize/status")
+async def api_organize_status() -> Any:
+    return _ok(organize.organizer.status())
+
+
+@app.get("/api/organize/history")
+async def api_organize_history(limit: int = 50) -> Any:
+    return _ok(store.organize_history(max(1, min(int(limit), 300))))
+
+
+# ------------------------------------------------------- 链接入库
+@app.post("/api/ingest")
+async def api_ingest(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    text = str(body.get("text") or "")
+    if not text.strip():
+        return _err("请粘贴 115 分享链接 / 磁力 / ed2k")
+    result = await asyncio.to_thread(ingest.ingest, text, None, bool(body.get("organize", True)))
+    if not result.get("ok"):
+        return _err(str(result.get("error") or "入库失败"))
+    return _ok(result)
+
+
+# ------------------------------------------------------- 企业微信回调（接收消息）
+@app.get("/api/wecom/callback")
+async def api_wecom_verify(request: Request) -> Any:
+    cfg = config.load()
+    try:
+        plain = wecom.verify_url(cfg, dict(request.query_params))
+    except wecom.WecomError as err:
+        logger.warn(f"[微信] 回调校验失败：{err}")
+        return Response(content=str(err), status_code=403, media_type="text/plain")
+    return Response(content=plain, media_type="text/plain")
+
+
+@app.post("/api/wecom/callback")
+async def api_wecom_callback(request: Request) -> Any:
+    cfg = config.load()
+    body = await request.body()
+    try:
+        reply = await asyncio.to_thread(wecom.handle_message, cfg, body, dict(request.query_params))
+    except wecom.WecomError as err:
+        logger.warn(f"[微信] 消息处理失败：{err}")
+        return Response(content=str(err), status_code=403, media_type="text/plain")
+    return Response(content=reply, media_type="application/xml")
+
+
+@app.post("/api/tmdb/test")
+async def api_tmdb_test() -> Any:
+    try:
+        return _ok(await asyncio.to_thread(tmdb.test, config.load()))
+    except tmdb.TmdbError as err:
+        return _err(str(err))
+
+
+@app.post("/api/ai/test")
+async def api_ai_test() -> Any:
+    try:
+        return _ok(await asyncio.to_thread(ai.test, config.load()))
+    except ai.AiError as err:
+        return _err(str(err))
 
 
 # ------------------------------------------------------- 全量同步
