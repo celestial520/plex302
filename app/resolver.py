@@ -120,6 +120,25 @@ class Resolver:
         return None
 
     @staticmethod
+    def map_plex_path(cfg: Dict[str, Any], cloud_path: str) -> Optional[str]:
+        """云盘路径 -> Plex 看到的路径（map_path 的反向，取最长前缀）。"""
+        path = "/" + unquote(str(cloud_path or "")).replace("\\", "/").strip("/")
+        best_len = -1
+        best: Optional[str] = None
+        for mount in cfg.get("mounts", []):
+            base = (mount.get("cloud_prefix") or "/").rstrip("/")
+            if base and base != "/" and not (path == base or path.startswith(base + "/")):
+                continue
+            rel = path[len(base):].lstrip("/") if base and base != "/" else path.lstrip("/")
+            plex_prefix = mount["plex_prefix"].rstrip("/")
+            candidate = plex_prefix + ("/" + rel if rel else "")
+            score = len(base)
+            if score > best_len:
+                best_len = score
+                best = candidate
+        return best
+
+    @staticmethod
     def _arg(args: Dict[str, Any], name: str) -> str:
         value = args.get(name)
         if isinstance(value, list):

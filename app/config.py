@@ -84,6 +84,14 @@ DEFAULTS: dict[str, Any] = {
         "secret": "",
         "webhook_token": "",
     },
+    # 115 网页版 Cookie：开放平台没有“最近文件”接口，靠它补
+    "u115": {
+        "cookie": "",
+        "recent_enabled": True,
+        "recent_interval": 120,
+        "recent_limit": 50,
+        "recent_first_scan": False,
+    },
     "advanced": {
         "force_direct_play": True,
         "part_cache_ttl": 86400,
@@ -230,6 +238,16 @@ def normalize(cfg: dict) -> dict:
         security["webhook_token"] = "p302_" + secrets.token_urlsafe(24)
     security["password_hash"] = str(security.get("password_hash") or "")
 
+    u115 = cfg["u115"]
+    cookie = str(u115.get("cookie") or "").replace("\r", " ").replace("\n", "; ").strip()
+    if cookie.lower().startswith("cookie:"):
+        cookie = cookie[7:].strip()
+    u115["cookie"] = "; ".join(p.strip() for p in cookie.split(";") if p.strip() and "=" in p)
+    u115["recent_enabled"] = _as_bool(u115.get("recent_enabled"), True)
+    u115["recent_first_scan"] = _as_bool(u115.get("recent_first_scan"), False)
+    u115["recent_interval"] = _as_int(u115.get("recent_interval"), 120, 30, 3600)
+    u115["recent_limit"] = _as_int(u115.get("recent_limit"), 50, 5, 200)
+
     adv = cfg["advanced"]
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
     adv["part_cache_ttl"] = _as_int(adv.get("part_cache_ttl"), 86400, 60, 30 * 86400)
@@ -312,6 +330,10 @@ def masked(cfg: dict) -> dict:
     out["provider"]["custom_token"] = ""
     out["cd2"]["token_set"] = bool(out["cd2"].get("token"))
     out["cd2"]["token"] = ""
+    cookie = out["u115"].get("cookie") or ""
+    out["u115"]["cookie_set"] = bool(cookie)
+    out["u115"]["cookie_hint"] = ("…" + cookie[-6:]) if cookie else ""
+    out["u115"]["cookie"] = ""
     out["security"]["password_set"] = bool(out["security"].get("password_hash"))
     out["security"].pop("password_hash", None)
     out["security"].pop("secret", None)
@@ -332,6 +354,12 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
         provider["alist_token"] = old_provider.get("alist_token", "")
     if not provider.get("custom_token"):
         provider["custom_token"] = old_provider.get("custom_token", "")
+    u115 = new_cfg.setdefault("u115", {})
+    old_u115 = old_cfg.get("u115", {})
+    u115.pop("cookie_set", None)
+    u115.pop("cookie_hint", None)
+    if not u115.get("cookie"):
+        u115["cookie"] = old_u115.get("cookie", "")
     security = new_cfg.setdefault("security", {})
     security.pop("password_set", None)
     if not security.get("password_hash"):

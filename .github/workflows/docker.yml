@@ -36,7 +36,9 @@ jobs:
           set -e
           mkdir -p "${PWD}/smoke-config"
           docker run -d --name p302 \
+            --add-host host.docker.internal:host-gateway \
             -e TZ=Asia/Shanghai \
+            -e P115_WEBAPI_BASE=http://host.docker.internal:32403 \
             -e NGINX_PORT=32500 \
             -e WEBUI_PORT=999 \
             -p 32500:32500 -p 999:999 \
@@ -99,6 +101,8 @@ jobs:
           cfg["plex"]["token"] = "mock"
           cfg["provider"]["type"] = "custom"
           cfg["provider"]["custom_url"] = f"http://{os.environ['GW']}:32402/link"
+          cfg["u115"]["cookie"] = "UID=ci; CID=ci; SEID=ci"
+          cfg["u115"]["recent_limit"] = 20
           json.dump(cfg, open("cfg2.json", "w"))
           PY
 
@@ -118,6 +122,22 @@ jobs:
             'http://127.0.0.1:32500/library/parts/123/1/file.mkv')
           echo "内网状态码=$code"
           [ "$code" = "200" ] || { echo "::error::内网应回源 200"; exit 1; }
+
+          echo "--- 115 最近文件 -> 局部入库 ---"
+          python3 tests/mock_115.py --host 0.0.0.0 --port 32403 &
+          sleep 2
+          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:9999/api/115/recent/run > /dev/null
+          curl -s -X POST -H 'Content-Type: application/json' \
+            -d "{\"file_id\":\"9100\",\"file_name\":\"S01E01.mkv\",\"parent_id\":\"2002\",\"pick_code\":\"ci1\",\"file_size\":104857600,\"sha1\":\"cisha1\",\"ctime\":$(( $(date +%s) - 120 ))}" \
+            http://127.0.0.1:32403/add > /dev/null
+          result=$(curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
+            http://127.0.0.1:9999/api/115/recent/run)
+          echo "$result"
+          echo "$result" | grep -q '"queued":1' || { echo "::error::115 最近文件没有入队扫描"; exit 1; }
+          sleep 2
+          curl -s -b cookie.txt 'http://127.0.0.1:9999/api/scan/history?limit=5' | grep -q '115recent' \
+            || { echo "::error::扫描记录里没有 115recent 来源"; exit 1; }
 
       - name: 输出日志
         if: always()

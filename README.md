@@ -22,6 +22,7 @@ Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 str
 | CD2 缓存刷新 | 扫描前用 CD2 gRPC `GetSubFiles(forceRefresh=true)` 刷新目录，避免新文件不可见 |
 | CMS 自动入库 | 目录监听 + Webhook 两条路：CMS 整理完落盘即扫，或主动调接口 |
 | 115 扫码 | 115 开放平台设备码授权，token 自动续期 |
+| 115 最近文件 | 用 115 Cookie 拉服务端“最近变动”，CMS 一落盘就能发现，比目录轮询更不容易漏 |
 | 多直链源 | 115 开放平台 / CloudDrive2 直链 / AList(OpenList) / 自定义 HTTP |
 | WebUI | 状态、媒体库、扫描记录、日志、路径映射、扫码登录全在网页里 |
 
@@ -244,6 +245,25 @@ curl -X POST "http://NAS:999/api/hook?token=p302_xxx" \
 - 支持 `path` / `paths` / `file` / `file_path` / `dir` / `save_path` 等字段
 - 一次最多处理 20 条，90 秒内重复路径自动去重
 
+### 方式 C：115 最近文件（最不容易漏，推荐和 A 一起开）
+
+CMS 整理完，最终结果就是“115 里某个 media 目录多了一个文件”。与其等 CD2 挂载刷新、再遍历目录，
+不如直接问 115：最近有没有新文件。
+
+配置：设置 → 115 授权 → 填 **115 网页 Cookie**（`UID=...; CID=...; SEID=...`），
+再到「扫描与自动入库」打开 **115 最近文件监听**。
+
+- 每 `recent_interval` 秒（默认 120）拉一次 115 的最近变动
+- 只处理视频文件，自动过滤目录、临时文件、小于 `min_size_mb` 的文件
+- 用「文件 id + sha1」去重，重启不会重复扫
+- 由 `parent_id` 反查完整云盘路径 → 路径映射 → 推导电影/剧集目录 → 局部扫描
+- 首次运行默认只记录最近文件、不批量扫（和目录监听一致），可在设置里改成“首次也扫描”
+
+Cookie 获取：浏览器登录 [115.com](https://115.com) → F12 → Network → 随便点一个 `webapi.115.com` 请求 →
+复制 Request Headers 里的 `Cookie` 整行。Cookie 失效时接口会返回 405，设置页「测试 Cookie」能直接看出来。
+
+> 三种方式是叠加的，不是三选一：Webhook 最即时、115 最近文件最不容易漏、CD2 目录监听负责兜底。
+
 ---
 
 ## 配置说明
@@ -266,6 +286,11 @@ curl -X POST "http://NAS:999/api/hook?token=p302_xxx" \
 | `server.redirect_lan` | `false` | 内网也 302 |
 | `advanced.force_direct_play` | `true` | 改写 Plex decision，强制 directPlay |
 | `advanced.url_cache_ttl` | `1800` | 直链缓存秒数（不会超过 Provider 返回的有效期） |
+| `u115.cookie` | 空 | 115 网页 Cookie，只用于“最近文件”监听 |
+| `u115.recent_enabled` | `true` | 是否开启 115 最近文件监听 |
+| `u115.recent_interval` | `120` | 拉取间隔（秒） |
+| `u115.recent_limit` | `50` | 每次拉多少条最近记录 |
+| `u115.recent_first_scan` | `false` | 首次运行是否也扫描（默认只记录） |
 
 ---
 
@@ -386,12 +411,38 @@ app/                 FastAPI 后端
   providers.py       直链来源：115 / CD2 / AList / 自定义
   resolver.py        路径映射 + 局域网判断 + 直链缓存
   scanner.py         扫描队列（去重、最长前缀匹配媒体库）
-  watcher.py         目录轮询，发现新文件后推导要扫的目录
+  watcher.py         CD2 目录轮询，发现新文件后推导要扫的目录
+  u115web.py         115 网页版 Cookie 接口（最近文件、目录路径）
+  recent.py          115 最近文件监听，事件驱动式局部入库
 nginx/
   plex302.js         njs：拦截 /library/parts、decision 改写、302 或回源
   plex302.conf.template  站点模板（端口由 entrypoint 注入）
 tests/mock_plex.py   假 Plex + 假 CDN，本地联调用
+tests/mock_115.py    假 115 webapi，测最近文件链路
 ```
+
+---
+
+## 和 plex-demo 的关系
+
+最先那版是按 `plex-demo` 的思路做的（nginx 拦截 → 本地 API 取直链 → 302 或回源），
+但它是 **strm 工作流**，本项目是 **Plex 直接扫 CD2 真实文件**，路线不同，功能不是一一对应：
+
+| 能力 | plex-demo | 本项目 |
+|---|---|---|
+| 外网 302 / 内网回源 | ✅ | ✅ |
+| Plex 局部刷新 | ✅ | ✅ |
+| 115 开放平台扫码 | ✅ | ✅ |
+| 115 Cookie | ❌ | ✅（最近文件监听） |
+| 目录监听自动入库 | 监控 strm | ✅ 监控 CD2 真实目录 |
+| strm 生成 / 监控 | ✅ | ❌ 不需要，Plex 直接扫真实文件 |
+| 115 秒传 | ✅ | ❌ 与入库无关 |
+| 自动重命名 / 写 NFO | ✅ | ❌ 建议交给 CMS / tinyMediaManager，避免误改 |
+| 微信通知 | ✅ | ❌ 暂未做 |
+| WebUI | Vue | 原生 JS（无构建，单容器） |
+
+如果你确实需要 strm 生成、秒传、自动重命名这些，我可以按需加，但它们和“不依赖 strm、不让 NAS 中转”
+的路线是冲突的，默认没做。
 
 ---
 

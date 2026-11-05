@@ -13,11 +13,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, cd2, config, logger, plex, resolver, scanner, store, u115, watcher
+from . import auth, cd2, config, logger, plex, recent, resolver, scanner, store, u115, u115web, watcher
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook"}
 
@@ -33,7 +33,9 @@ async def lifespan(app: FastAPI):
         logger.warn("WebUI 初始账号 admin/admin，请登录后立即修改密码")
     await scanner.scanner.start()
     await watcher.watcher.start()
+    await recent.recent_watcher.start()
     yield
+    await recent.recent_watcher.stop()
     await watcher.watcher.stop()
     await scanner.scanner.stop()
     logger.info("Plex302 已停止")
@@ -172,6 +174,7 @@ async def api_status(request: Request) -> Any:
             "provider": cfg["provider"]["type"],
             "mounts": len(cfg["mounts"]),
             "watch": watcher.watcher.last_summary,
+            "recent": {**recent.recent_watcher.status(), "cookie_set": bool(cfg["u115"].get("cookie"))},
             "scanner_pending": scanner.scanner.pending(),
             "stats": {
                 "today": today_stat,
@@ -459,6 +462,37 @@ async def api_115_logout() -> Any:
     u115.client.logout()
     logger.info("[115] 已退出登录")
     return _ok()
+
+
+# ------------------------------------------------------- 115 网页 Cookie / 最近文件
+@app.post("/api/115/cookie/test")
+async def api_115_cookie_test(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    cookie = str((body or {}).get("cookie") or "").strip()
+    cfg = config.load()
+    if cookie:
+        cfg["u115"]["cookie"] = u115web.normalize_cookie(cookie)
+    try:
+        result = await asyncio.to_thread(u115web.test, cfg)
+    except u115web.Web115Error as err:
+        return _err(str(err))
+    return _ok(result)
+
+
+@app.post("/api/115/recent/run")
+async def api_115_recent_run() -> Any:
+    summary = await recent.recent_watcher.run_once(force=True)
+    if summary.get("ok") is False:
+        return _err(summary.get("error") or "拉取 115 最近文件失败")
+    return _ok(summary)
+
+
+@app.get("/api/115/recent/events")
+async def api_115_recent_events(limit: int = 20) -> Any:
+    return _ok(store.recent_events(max(1, min(int(limit), 200))))
 
 
 # --------------------------------------------------------------------- 日志

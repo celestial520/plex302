@@ -57,6 +57,16 @@ def _db() -> sqlite3.Connection:
             errors INTEGER DEFAULT 0
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS recent_seen (
+            key TEXT PRIMARY KEY,
+            name TEXT,
+            cloud_path TEXT,
+            plex_path TEXT,
+            seen_at REAL,
+            scanned INTEGER DEFAULT 0
+        )"""
+    )
     conn.commit()
     _conn = conn
     return conn
@@ -159,6 +169,44 @@ def cleanup_watch_files(days: int = 30) -> None:
     cutoff = time.time() - days * 86400
     with _lock:
         _db().execute("DELETE FROM watch_files WHERE first_seen < ? AND scanned_at IS NOT NULL", (cutoff,))
+        _db().commit()
+
+
+# ---------------------------------------------------------------- 115 最近文件
+def recent_seen(key: str) -> bool:
+    with _lock:
+        row = _db().execute("SELECT 1 FROM recent_seen WHERE key=?", (key,)).fetchone()
+    return bool(row)
+
+
+def mark_recent(key: str, name: str, cloud_path: str, plex_path: str, scanned: bool = False) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO recent_seen(key, name, cloud_path, plex_path, seen_at, scanned) "
+            "VALUES (?,?,?,?,?,?)",
+            (key, name[:400], cloud_path, plex_path, time.time(), 1 if scanned else 0),
+        )
+        _db().commit()
+
+
+def recent_count() -> int:
+    with _lock:
+        row = _db().execute("SELECT COUNT(*) AS c FROM recent_seen").fetchone()
+    return int(row["c"] if row else 0)
+
+
+def recent_events(limit: int = 20) -> list[dict[str, Any]]:
+    with _lock:
+        rows = _db().execute(
+            "SELECT * FROM recent_seen ORDER BY seen_at DESC LIMIT ?", (int(limit),)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cleanup_recent(days: int = 30) -> None:
+    cutoff = time.time() - days * 86400
+    with _lock:
+        _db().execute("DELETE FROM recent_seen WHERE seen_at < ?", (cutoff,))
         _db().commit()
 
 

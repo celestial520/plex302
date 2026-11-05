@@ -191,11 +191,13 @@
 
     $('#side-version').textContent = 'v' + (s.version || '1.0.0');
 
+    const recent = s.recent || {};
     const rows = [
       ['Plex 服务器', plex.ok ? `v${plex.version || ''} · ${plex.name || ''}` : (plex.error || '未连接'), plex.ok, '#i-play'],
       ['115 开放平台', u115.authorized ? `${u115.user_name || '已授权'} · token 有效` : '未授权，外网 302 不可用', !!u115.authorized, '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : (cd2.message || '未连接'), !!cd2.ok, '#i-scan'],
       ['目录监听', watch.enabled === false ? '已关闭' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled !== false, '#i-logs'],
+      ['115 最近文件', !recent.cookie_set ? '未配置 Cookie' : (recent.summary && recent.summary.at ? `已记录 ${recent.seen || 0} 条 · 上轮入队 ${recent.summary.queued || 0}` : '等待首轮检查'), !!recent.cookie_set && !(recent.summary && recent.summary.ok === false), '#i-link'],
     ];
     $('#status-list').innerHTML = rows.map((r) => `
       <div class="status-row">
@@ -386,6 +388,16 @@
           ${u115.authorized ? '<button class="btn sm danger" id="btn-115-logout">退出登录</button>' : ''}
           <button class="btn sm" id="btn-115-check">刷新状态</button>
         </div></div>
+        <div class="field full" style="margin-top:18px">
+          <label>115 网页 Cookie <span class="muted">（用于“最近文件”监听，可选）</span></label>
+          <textarea class="input" id="cfg-115-cookie" rows="3" placeholder="${c.u115.cookie_set ? '已保存（' + esc(c.u115.cookie_hint || '') + '），留空不修改' : 'UID=...; CID=...; SEID=...'}"></textarea>
+          <span class="desc">浏览器登录 <code>115.com</code> → F12 → Network → 随便点一个 <code>webapi.115.com</code> 请求 → 复制请求头里的 Cookie。
+          开放平台没有“最近文件”接口，靠它发现 CMS 刚整理进 media 目录的文件，比目录轮询更不容易漏。</span>
+        </div>
+        <div class="field full"><div class="field-row">
+          <button class="btn sm" id="btn-115-cookie-test">测试 Cookie</button>
+          <span class="desc" id="cookie-test-result"></span>
+        </div></div>
       `, true)}
 
       ${section('CloudDrive2', 'CD2 只用于「挂载给 Plex 扫描」和「刷新目录缓存」；gRPC 端口默认 19798。', `
@@ -452,6 +464,23 @@
           <span class="desc">文件修改时间小于这个值先跳过，避免整理中途被扫到。</span></div>
         <div class="field"><label>最大目录深度</label>${input('cfg-depth', c.scan.max_depth, '4', 'number')}</div>
         <div class="field"><label>最小文件大小（MB）</label>${input('cfg-minsize', c.scan.min_size_mb, '20', 'number')}</div>
+
+        <div class="field full" style="margin-top:6px">
+          <div class="callout info">下面这组是「115 最近文件监听」：直接问 115 服务端最近有没有新文件，不依赖 CD2 目录缓存，
+          适合 CMS 整理完立刻入库、又怕目录轮询漏掉的场景。需要先在上面填 115 Cookie。</div>
+        </div>
+        <div class="field full">
+          ${switchLine('115 最近文件监听', '定时拉取 115 最近变动，发现新视频就局部扫描', 'cfg-recent-enabled', c.u115.recent_enabled)}
+          ${switchLine('首次运行也扫描', '第一次启动时把当前最近文件也入库；默认只记录，不批量扫', 'cfg-recent-first', c.u115.recent_first_scan)}
+        </div>
+        <div class="field"><label>115 检查间隔（秒）</label>${input('cfg-recent-interval', c.u115.recent_interval, '120', 'number')}</div>
+        <div class="field"><label>每次检查条数</label>${input('cfg-recent-limit', c.u115.recent_limit, '50', 'number')}
+          <span class="desc">建议 30~100，越大越不容易漏，但请求也越重。</span></div>
+        <div class="field full"><div class="field-row">
+          <button class="btn sm" id="btn-recent-run">立即检查一次</button>
+          <span class="desc" id="recent-run-result"></span>
+        </div></div>
+
         <div class="field full"><label>CMS / 外部通知 Webhook</label>
           <div class="field-row"><input class="input" id="cfg-webhook" readonly value="${esc((state.status && state.status.webhook_url) || '')}"><button class="btn sm" id="btn-copy-hook"><svg><use href="#i-copy"></use></svg>复制</button></div>
           <span class="desc">CMS 整理完可以 GET 这个地址并带 <code>&amp;path=/电影/xxx</code>；也支持 POST JSON <code>{"path":"/电影/xxx"}</code>。不带 path 时监听会兜底。</span>
@@ -542,6 +571,30 @@
       loadAll(true);
     });
     $('#btn-115-check').addEventListener('click', () => loadAll(true).then(() => toast('状态已刷新', 'ok')));
+    $('#btn-115-cookie-test').addEventListener('click', async () => {
+      const out = $('#cookie-test-result');
+      const cookie = ($('#cfg-115-cookie').value || '').trim();
+      out.textContent = '测试中…';
+      try {
+        const res = await api('/api/115/cookie/test', { method: 'POST', body: { cookie } });
+        const d = res.data || {};
+        out.textContent = `Cookie 可用，最近文件 ${d.count || 0} 条` + (d.sample && d.sample.name ? `（最新：${d.sample.name}）` : '');
+      } catch (err) {
+        out.textContent = err.message || 'Cookie 测试失败';
+      }
+    });
+    $('#btn-recent-run').addEventListener('click', async () => {
+      const out = $('#recent-run-result');
+      out.textContent = '检查中…';
+      try {
+        const res = await api('/api/115/recent/run', { method: 'POST', body: {} });
+        const d = res.data || {};
+        out.textContent = `检查 ${d.checked || 0} 条 / 新视频 ${d.new || 0} / 入队 ${d.queued || 0}` + (d.first_run ? '（首次只记录）' : '');
+        loadAll(true);
+      } catch (err) {
+        out.textContent = err.message || '检查失败';
+      }
+    });
     $('#btn-copy-hook').addEventListener('click', () => copyText($('#cfg-webhook').value));
     $('#btn-change-pass').addEventListener('click', async () => {
       const old = $('#cfg-old-pass').value;
@@ -578,12 +631,14 @@
     const c = structuredClone(state.config);
     const val = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
     const checked = (id) => { const el = $('#' + id); return el ? el.checked : false; };
+    // 设置页没渲染时不要保存：否则所有字段都读到空值，会把配置重置成默认
+    if (!$('#cfg-plex-url')) return null;
 
-    c.plex.url = val('cfg-plex-url');
+    c.plex.url = val('cfg-plex-url') || c.plex.url;
     if (val('cfg-plex-token')) c.plex.token = val('cfg-plex-token');
     c.cd2.address = val('cfg-cd2-address');
     if (val('cfg-cd2-token')) c.cd2.token = val('cfg-cd2-token');
-    c.provider.type = val('cfg-provider');
+    c.provider.type = val('cfg-provider') || c.provider.type;
     c.provider.ua_mode = val('cfg-ua-mode');
     c.provider.fixed_ua = val('cfg-fixed-ua');
     c.provider.u115_client_id = val('cfg-115-client');
@@ -609,6 +664,12 @@
     c.scan.max_depth = Number(val('cfg-depth')) || 4;
     c.scan.min_size_mb = Number(val('cfg-minsize')) || 20;
 
+    c.u115.recent_enabled = checked('cfg-recent-enabled');
+    c.u115.recent_first_scan = checked('cfg-recent-first');
+    c.u115.recent_interval = Number(val('cfg-recent-interval')) || 120;
+    c.u115.recent_limit = Number(val('cfg-recent-limit')) || 50;
+    if (val('cfg-115-cookie')) c.u115.cookie = val('cfg-115-cookie');
+
     c.server.public_url = val('cfg-public-url');
     c.server.lan_cidrs = val('cfg-lan').split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
     c.server.trust_forwarded_for = checked('cfg-trust-xff');
@@ -624,6 +685,7 @@
     btn.innerHTML = '保存中…';
     try {
       const cfg = collectConfig();
+      if (!cfg) { toast('请先打开设置页再保存', 'bad'); return; }
       const res = await api('/api/config', { method: 'POST', body: cfg });
       state.config = res.data;
       toast('配置已保存', 'ok');
