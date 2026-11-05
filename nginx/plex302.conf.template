@@ -1,0 +1,101 @@
+js_path /etc/nginx/conf.d/;
+js_import p302 from plex302.js;
+
+# Plex 地址由 runtime.json 提供；改配置后 WebUI 会 nginx -s reload
+js_set $plex p302.getPlex;
+
+server {
+    listen __PORT__ default_server;
+    listen [::]:__PORT__ default_server;
+    server_name _;
+
+    resolver 223.5.5.5 119.29.29.29 valid=300s ipv6=off;
+    js_fetch_verify off;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header Range $http_range;
+    proxy_set_header If-Range $http_if_range;
+
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 3600s;
+    proxy_read_timeout 3600s;
+    proxy_request_buffering off;
+    proxy_buffering off;
+
+    add_header Referrer-Policy "no-referrer" always;
+
+    # WebSocket（Plex Web 的实时通知）
+    location ~* /websockets {
+        proxy_pass $plex;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+
+    # 真正的播放请求：问 resolver，能 302 就 302，不能就回源
+    location ~* ^/library/parts/\d+/ {
+        js_content p302.redirect2Pan;
+    }
+
+    # 部分客户端走 universal start；directPlay=1 时同样 302
+    location ~* ^/video/:/transcode/universal/start {
+        js_content p302.redirect2Pan;
+    }
+
+    # 起播决策：强制 directPlay，避免服务端转码
+    location ~* ^/video/:/transcode/universal/decision {
+        js_content p302.decision;
+    }
+
+    # 转码分片必须回源，不能 302
+    location ~* ^/video/:/transcode/universal/session {
+        proxy_pass $plex;
+    }
+
+    # 字幕等小文件回源
+    location ~* ^/library/streams/\d+$ {
+        proxy_pass $plex;
+        proxy_set_header Range "";
+    }
+
+    # njs 返回 418 时走这里：$request_uri 是客户端原始编码后的 URI
+    error_page 418 = @plex_proxy;
+
+    location @plex_proxy {
+        proxy_pass $plex$request_uri;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_set_header Accept-Encoding "";
+        proxy_buffering off;
+    }
+
+    # decision 子请求的回源入口（URI 固定为 ASCII，参数里只有数字/短字符串）
+    location ^~ /__plex/ {
+        internal;
+        rewrite ^/__plex(/.*)$ $1 break;
+        proxy_pass $plex$uri$is_args$args;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_set_header Accept-Encoding "";
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass $plex;
+    }
+}

@@ -1,0 +1,16 @@
+services:
+  plex302:
+    image: ghcr.io/celestial520/plex302:latest
+    # build: .                        # 想自己编译就注释掉上面这行、打开这行
+    container_name: plex302
+    network_mode: host               # 必须 host：要拿到客户端真实 IP，还要直连 CD2 gRPC
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      NGINX_PORT: 32500              # Plex 客户端以后连这个端口
+      WEBUI_PORT: 999                # 管理页面
+    volumes:
+      - ./config:/config
+      - ./log:/var/log/nginx
+      # CD2 挂载路径：必须和 Plex 里看到的路径一致（只做路径映射，不读文件）
+      - /mnt/cd2:/mnt/cd2

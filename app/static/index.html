@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plex302 · 云盘直链助手</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-7h6v7"/></symbol>
+  <symbol id="i-library" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M6.5 8h0M17.5 8h0"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M7 12h10"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.55-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.48.66.88.77H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.23z"/></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 10h16M4 15h10M4 20h7"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5.5v13l11-6.5z"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.07 0l-2 2a5 5 0 0 0 7.07 7.07l1.1-1.1"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12.5 5 5L20 6.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20v.01M20 20v.01"/></symbol>
+</svg>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><svg><use href="#i-play"></use></svg></div>
+      <div class="brand-name">Plex302<small>云盘直链助手</small></div>
+    </div>
+    <nav class="nav" id="nav">
+      <a href="#overview" data-tab="overview" class="active"><svg><use href="#i-home"></use></svg>概览</a>
+      <a href="#library" data-tab="library"><svg><use href="#i-library"></use></svg>媒体库</a>
+      <a href="#scans" data-tab="scans"><svg><use href="#i-scan"></use></svg>扫描记录</a>
+      <a href="#settings" data-tab="settings"><svg><use href="#i-settings"></use></svg>设置</a>
+      <a href="#logs" data-tab="logs"><svg><use href="#i-logs"></use></svg>日志</a>
+    </nav>
+    <div class="side-foot">
+      <div id="side-version">v1.0.0</div>
+      <a href="https://github.com/celestial520/plex302" target="_blank" rel="noreferrer">GitHub · 使用说明</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="page-title">
+        <h1 id="page-title">概览</h1>
+        <p id="page-sub">外网播放 302 到云盘，内网回源 Plex；CMS 整理完自动局部入库。</p>
+      </div>
+      <div class="top-actions">
+        <span class="pill" id="pill-plex"><i class="dot"></i>Plex</span>
+        <span class="pill" id="pill-115"><i class="dot"></i>115</span>
+        <span class="pill" id="pill-cd2"><i class="dot"></i>CD2</span>
+        <button class="btn ghost sm" id="btn-refresh-all"><svg><use href="#i-refresh"></use></svg>刷新</button>
+        <button class="btn ghost sm" id="btn-logout">退出</button>
+      </div>
+    </header>
+
+    <section class="view active" id="view-overview">
+      <div class="hero">
+        <div>
+          <div class="hero-badge">DIRECT PLAY · 302</div>
+          <h2>外网播放，不再经过 NAS 中转</h2>
+          <p>Plex 通过 CD2 挂载扫描入库；外网客户端起播时，服务把 <code>/library/parts</code> 请求 302 到云盘直链。局域网仍然回源 Plex，转码和字幕都不受影响。</p>
+        </div>
+        <div class="hero-actions">
+          <button class="btn primary" id="btn-hero-scan"><svg><use href="#i-scan"></use></svg>扫描一个路径</button>
+          <button class="btn" id="btn-hero-test"><svg><use href="#i-link"></use></svg>测试直链</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat accent">
+          <div class="label">今日 302</div>
+          <div class="value" id="stat-today">0</div>
+          <div class="sub" id="stat-today-sub">外网起播次数</div>
+        </div>
+        <div class="stat">
+          <div class="label">累计 302</div>
+          <div class="value" id="stat-total">0</div>
+          <div class="sub">全部直接走云盘</div>
+        </div>
+        <div class="stat">
+          <div class="label">今日扫描</div>
+          <div class="value" id="stat-scans">0</div>
+          <div class="sub">CMS / 监听 / 手动</div>
+        </div>
+        <div class="stat">
+          <div class="label">目录监听</div>
+          <div class="value" id="stat-watch">—</div>
+          <div class="sub" id="stat-watch-sub">等待首轮索引</div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h3>链路状态</h3><span class="hint">点「刷新」重新检测</span></div>
+          <div class="panel-body">
+            <div class="status-list" id="status-list">
+              <div class="empty">正在检测…</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>最近扫描</h3><a class="hint" href="#scans">查看全部 →</a></div>
+          <div class="panel-body" style="padding-top:2px">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>路径</th><th>状态</th></tr></thead>
+                <tbody id="recent-scans"><tr><td colspan="3"><div class="empty">暂无记录</div></td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-library">
+      <div class="panel">
+        <div class="panel-head">
+          <div><h3>Plex 媒体库</h3><span class="hint">打开「自动监听」后，新文件落进 CD2 挂载目录会自动局部扫描</span></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn sm" id="btn-reload-libs"><svg><use href="#i-refresh"></use></svg>重新读取</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding-top:0">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>媒体库</th><th>类型</th><th>Plex 路径</th><th>影片数</th><th>自动监听</th><th>操作</th></tr></thead>
+              <tbody id="lib-body"><tr><td colspan="6"><div class="empty">加载中…</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="callout info" style="margin-top:14px">
+        局部扫描调用的是 Plex 官方接口 <code>GET /library/sections/&lt;id&gt;/refresh?path=&lt;目录&gt;</code>，只扫指定目录，不会全库扫描。
+        扫描前会先通过 CD2 gRPC 强制刷新对应目录，避免 CD2 缓存导致新文件不可见。
+      </div>
+    </section>
+
+    <section class="view" id="view-scans">
+      <div class="panel">
+        <div class="panel-head">
+          <div><h3>扫描记录</h3><span class="hint">最近 50 条；来源包括 manual / cms / watch</span></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn sm" id="btn-run-watch"><svg><use href="#i-scan"></use></svg>立即执行监听</button>
+            <button class="btn sm" id="btn-scan-refresh"><svg><use href="#i-refresh"></use></svg>刷新</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding-top:0">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>路径</th><th>媒体库</th><th>来源</th><th>状态</th><th>信息</th></tr></thead>
+              <tbody id="scan-body"><tr><td colspan="6"><div class="empty">加载中…</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div id="settings-body"><div class="empty">加载配置中…</div></div>
+      <div class="save-bar">
+        <span id="save-hint">修改后点保存；Plex 地址变更会自动 reload nginx。</span>
+        <button class="btn primary" id="btn-save"><svg><use href="#i-check"></use></svg>保存配置</button>
+      </div>
+    </section>
+
+    <section class="view" id="view-logs">
+      <div class="panel">
+        <div class="panel-head">
+          <div><h3>运行日志</h3><span class="hint">写文件并轮转，最多看最近 2000 行</span></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="input" id="log-keyword" placeholder="过滤关键字，如 302 / ERROR" style="width:220px;height:32px">
+            <label class="pill" style="cursor:pointer"><input type="checkbox" id="log-auto" checked style="accent-color:#7c6cff"> 自动刷新</label>
+            <button class="btn sm" id="btn-log-refresh"><svg><use href="#i-refresh"></use></svg>刷新</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding-top:0">
+          <div class="log-box" id="log-box">加载中…</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

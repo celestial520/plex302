@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · Plex302</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; }
+    .login-card {
+      width: min(380px, calc(100vw - 32px));
+      border: 1px solid var(--line-strong); border-radius: 22px;
+      background: linear-gradient(180deg, rgba(20, 26, 38, .95), rgba(12, 16, 24, .95));
+      box-shadow: var(--shadow); padding: 30px 28px 26px;
+    }
+    .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+    .login-brand .brand-mark { width: 40px; height: 40px; }
+    .login-brand b { font-size: 16px; display: block; }
+    .login-brand span { color: var(--muted); font-size: 11.5px; }
+    .login-card h1 { font-size: 19px; margin: 0 0 6px; }
+    .login-card p { color: var(--muted); font-size: 12.5px; line-height: 1.6; margin: 0 0 18px; }
+    .login-card .field { margin-bottom: 14px; }
+    .login-card .btn { width: 100%; height: 40px; }
+    .login-error { color: #ffb4b4; font-size: 12px; min-height: 18px; margin: 4px 0 10px; }
+    .login-foot { color: var(--muted-2); font-size: 11px; margin-top: 18px; text-align: center; }
+  </style>
+</head>
+<body>
+  <form class="login-card" id="login-form">
+    <div class="login-brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="19" height="19"><path d="M8 5.5v13l11-6.5z"/></svg></div>
+      <div><b>Plex302</b><span>云盘直链助手</span></div>
+    </div>
+    <h1>登录管理页面</h1>
+    <p>默认账号 admin / admin；登录后请到「设置 → 安全」修改密码。</p>
+    <div class="field">
+      <label>密码</label>
+      <input class="input" type="password" id="password" autocomplete="current-password" placeholder="请输入密码" autofocus>
+    </div>
+    <div class="login-error" id="error"></div>
+    <button class="btn primary" type="submit" id="submit">登录</button>
+    <div class="login-foot">Plex302 · 只做 302 和局部扫描，不碰你的媒体文件</div>
+  </form>
+  <div id="toast-root"></div>
+  <script>
+    const form = document.getElementById('login-form');
+    const err = document.getElementById('error');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      const btn = document.getElementById('submit');
+      btn.disabled = true; btn.textContent = '登录中…';
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: document.getElementById('password').value })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || '登录失败');
+        location.href = '/';
+      } catch (ex) {
+        err.textContent = ex.message;
+        btn.disabled = false; btn.textContent = '登录';
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,341 @@
+"""配置读写：/config/config.json
+
+只做很薄的一层校验，保证坏配置不会把整个服务带崩。
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import secrets
+import threading
+from pathlib import Path
+from typing import Any
+
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "/config"))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+RUNTIME_FILE = CONFIG_DIR / "runtime.json"
+LOG_DIR = CONFIG_DIR / "logs"
+TOKEN_FILE = CONFIG_DIR / "115_token.json"
+
+DEFAULT_MOUNT = {
+    "name": "CD2",
+    "plex_prefix": "/mnt/cd2",
+    "cloud_prefix": "/",
+    "cd2_prefix": "",
+}
+
+DEFAULTS: dict[str, Any] = {
+    "version": 1,
+    "plex": {
+        "url": "http://127.0.0.1:32400",
+        "token": "",
+        "verify_tls": False,
+    },
+    "server": {
+        "name": "Plex302",
+        "public_url": "",
+        "lan_cidrs": [
+            "127.0.0.0/8",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "::1/128",
+            "fc00::/7",
+            "fe80::/10",
+        ],
+        "trust_forwarded_for": True,
+        "redirect_lan": False,
+    },
+    "mounts": [dict(DEFAULT_MOUNT)],
+    "cd2": {
+        "address": "127.0.0.1:19798",
+        "token": "",
+    },
+    "provider": {
+        "type": "115",  # 115 | cd2 | alist | custom | none
+        "ua_mode": "client",  # client | fixed
+        "fixed_ua": "Plex302/1.0",
+        "force_https": True,
+        "alist_base": "",
+        "alist_token": "",
+        "alist_public_base": "",
+        "custom_url": "",
+        "custom_token": "",
+        "u115_client_id": "100197847",
+    },
+    "scan": {
+        "enabled": True,
+        "watch_enabled": True,
+        "watch_sections": [],
+        "interval": 180,
+        "settle_seconds": 90,
+        "max_depth": 4,
+        "min_size_mb": 20,
+        "max_entries": 200000,
+        "first_run_scan": False,
+        "video_exts": [
+            ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".ts", ".m2ts",
+            ".flv", ".webm", ".iso", ".rmvb", ".mpg", ".mpeg", ".m4v",
+        ],
+    },
+    "security": {
+        "password_hash": "",
+        "secret": "",
+        "webhook_token": "",
+    },
+    "advanced": {
+        "force_direct_play": True,
+        "part_cache_ttl": 86400,
+        "url_cache_ttl": 1800,
+        "log_redirects": True,
+    },
+}
+
+_lock = threading.RLock()
+_cache: dict[str, Any] | None = None
+_cache_mtime: float = 0.0
+
+
+def _deep_merge(base: dict, patch: dict) -> dict:
+    out = copy.deepcopy(base)
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "y")
+    return default
+
+
+def _as_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, num))
+
+
+def _norm_prefix(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if not text.startswith("/"):
+        text = "/" + text
+    if len(text) > 1:
+        text = text.rstrip("/")
+    return text
+
+
+def normalize(cfg: dict) -> dict:
+    """把外部输入收敛成安全、可预期的结构。"""
+    cfg = _deep_merge(DEFAULTS, cfg if isinstance(cfg, dict) else {})
+
+    plex = cfg["plex"]
+    plex["url"] = str(plex.get("url") or DEFAULTS["plex"]["url"]).strip().rstrip("/")
+    plex["token"] = str(plex.get("token") or "").strip()
+    plex["verify_tls"] = _as_bool(plex.get("verify_tls"), False)
+
+    server = cfg["server"]
+    server["name"] = str(server.get("name") or "Plex302")[:60]
+    server["public_url"] = str(server.get("public_url") or "").strip().rstrip("/")
+    server["trust_forwarded_for"] = _as_bool(server.get("trust_forwarded_for"), True)
+    server["redirect_lan"] = _as_bool(server.get("redirect_lan"), False)
+    cidrs = server.get("lan_cidrs")
+    if isinstance(cidrs, str):
+        cidrs = [x.strip() for x in cidrs.replace("\n", ",").split(",") if x.strip()]
+    if not isinstance(cidrs, list):
+        cidrs = DEFAULTS["server"]["lan_cidrs"]
+    server["lan_cidrs"] = [str(x).strip() for x in cidrs if str(x).strip()]
+
+    mounts = []
+    raw_mounts = cfg.get("mounts")
+    if isinstance(raw_mounts, str):
+        raw_mounts = []
+    for item in raw_mounts or []:
+        if not isinstance(item, dict):
+            continue
+        plex_prefix = _norm_prefix(item.get("plex_prefix"))
+        if not plex_prefix:
+            continue
+        cloud_prefix = _norm_prefix(item.get("cloud_prefix")) or "/"
+        mounts.append(
+            {
+                "name": str(item.get("name") or "CD2")[:40],
+                "plex_prefix": plex_prefix,
+                "cloud_prefix": cloud_prefix,
+                "cd2_prefix": _norm_prefix(item.get("cd2_prefix")),
+            }
+        )
+    cfg["mounts"] = mounts
+
+    cd2 = cfg["cd2"]
+    cd2["address"] = str(cd2.get("address") or "127.0.0.1:19798").strip().replace("http://", "").replace("https://", "")
+    cd2["token"] = str(cd2.get("token") or "").strip()
+
+    provider = cfg["provider"]
+    ptype = str(provider.get("type") or "115").lower()
+    provider["type"] = ptype if ptype in ("115", "cd2", "alist", "custom", "none") else "115"
+    provider["ua_mode"] = "fixed" if str(provider.get("ua_mode")) == "fixed" else "client"
+    provider["fixed_ua"] = str(provider.get("fixed_ua") or "Plex302/1.0")[:200]
+    provider["force_https"] = _as_bool(provider.get("force_https"), True)
+    provider["alist_base"] = str(provider.get("alist_base") or "").strip().rstrip("/")
+    provider["alist_token"] = str(provider.get("alist_token") or "").strip()
+    provider["alist_public_base"] = str(provider.get("alist_public_base") or "").strip().rstrip("/")
+    provider["custom_url"] = str(provider.get("custom_url") or "").strip()
+    provider["custom_token"] = str(provider.get("custom_token") or "").strip()
+    provider["u115_client_id"] = str(provider.get("u115_client_id") or "100197847").strip()
+
+    scan = cfg["scan"]
+    scan["enabled"] = _as_bool(scan.get("enabled"), True)
+    scan["watch_enabled"] = _as_bool(scan.get("watch_enabled"), True)
+    scan["first_run_scan"] = _as_bool(scan.get("first_run_scan"), False)
+    scan["interval"] = _as_int(scan.get("interval"), 180, 30, 86400)
+    scan["settle_seconds"] = _as_int(scan.get("settle_seconds"), 90, 0, 86400)
+    scan["max_depth"] = _as_int(scan.get("max_depth"), 4, 1, 12)
+    scan["min_size_mb"] = _as_int(scan.get("min_size_mb"), 20, 0, 1024 * 1024)
+    scan["max_entries"] = _as_int(scan.get("max_entries"), 200000, 1000, 5000000)
+    ws = scan.get("watch_sections")
+    if isinstance(ws, str):
+        ws = [x.strip() for x in ws.split(",") if x.strip()]
+    scan["watch_sections"] = [str(x) for x in (ws or [])]
+    exts = scan.get("video_exts")
+    if isinstance(exts, str):
+        exts = [x.strip() for x in exts.replace("\n", ",").split(",") if x.strip()]
+    if not isinstance(exts, list) or not exts:
+        exts = DEFAULTS["scan"]["video_exts"]
+    norm_exts = []
+    for ext in exts:
+        ext = str(ext).strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        norm_exts.append(ext)
+    scan["video_exts"] = sorted(set(norm_exts))
+
+    security = cfg["security"]
+    if not security.get("secret"):
+        security["secret"] = secrets.token_hex(32)
+    if not security.get("webhook_token"):
+        security["webhook_token"] = "p302_" + secrets.token_urlsafe(24)
+    security["password_hash"] = str(security.get("password_hash") or "")
+
+    adv = cfg["advanced"]
+    adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
+    adv["part_cache_ttl"] = _as_int(adv.get("part_cache_ttl"), 86400, 60, 30 * 86400)
+    adv["url_cache_ttl"] = _as_int(adv.get("url_cache_ttl"), 1800, 30, 86400)
+    adv["log_redirects"] = _as_bool(adv.get("log_redirects"), True)
+
+    # 未知字段直接丢弃，避免前端误传导致配置文件越来越大
+    known = set(DEFAULTS.keys())
+    return {k: v for k, v in cfg.items() if k in known}
+
+
+def ensure_dirs() -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load(force: bool = False) -> dict:
+    global _cache, _cache_mtime
+    with _lock:
+        if not CONFIG_FILE.exists():
+            cfg = normalize({})
+            save(cfg)
+            return copy.deepcopy(cfg)
+        try:
+            mtime = CONFIG_FILE.stat().st_mtime
+        except OSError:
+            mtime = 0
+        if _cache is not None and not force and mtime == _cache_mtime:
+            return copy.deepcopy(_cache)
+        try:
+            raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        cfg = normalize(raw)
+        _cache = cfg
+        _cache_mtime = mtime
+        return copy.deepcopy(cfg)
+
+
+def save(cfg: dict) -> dict:
+    global _cache, _cache_mtime
+    with _lock:
+        cfg = normalize(cfg)
+        ensure_dirs()
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, CONFIG_FILE)
+        _cache = cfg
+        try:
+            _cache_mtime = CONFIG_FILE.stat().st_mtime
+        except OSError:
+            _cache_mtime = 0
+        write_runtime(cfg)
+        return copy.deepcopy(cfg)
+
+
+def write_runtime(cfg: dict | None = None) -> None:
+    """给 njs 读的运行时配置。"""
+    cfg = cfg or load()
+    payload = {
+        "plex": cfg["plex"]["url"],
+        "resolver": "http://127.0.0.1:{}".format(os.getenv("WEBUI_PORT", "999")),
+        "token": cfg["security"]["secret"][:48],
+        "trust_proxy": cfg["server"]["trust_forwarded_for"],
+        "force_direct_play": cfg["advanced"]["force_direct_play"],
+    }
+    ensure_dirs()
+    tmp = RUNTIME_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, RUNTIME_FILE)
+
+
+def masked(cfg: dict) -> dict:
+    out = copy.deepcopy(cfg)
+    out["plex"]["token_set"] = bool(out["plex"].get("token"))
+    out["plex"]["token"] = ""
+    out["provider"]["alist_token_set"] = bool(out["provider"].get("alist_token"))
+    out["provider"]["alist_token"] = ""
+    out["provider"]["custom_token_set"] = bool(out["provider"].get("custom_token"))
+    out["provider"]["custom_token"] = ""
+    out["cd2"]["token_set"] = bool(out["cd2"].get("token"))
+    out["cd2"]["token"] = ""
+    out["security"]["password_set"] = bool(out["security"].get("password_hash"))
+    out["security"].pop("password_hash", None)
+    out["security"].pop("secret", None)
+    return out
+
+
+def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
+    """前端留空代表“不修改”，避免每次保存都要重新填 token。"""
+    new_cfg = copy.deepcopy(new_cfg)
+    if not (new_cfg.get("plex") or {}).get("token"):
+        new_cfg.setdefault("plex", {})["token"] = old_cfg["plex"].get("token", "")
+    cd2 = new_cfg.setdefault("cd2", {})
+    if not cd2.get("token"):
+        cd2["token"] = old_cfg.get("cd2", {}).get("token", "")
+    provider = new_cfg.setdefault("provider", {})
+    old_provider = old_cfg.get("provider", {})
+    if not provider.get("alist_token"):
+        provider["alist_token"] = old_provider.get("alist_token", "")
+    if not provider.get("custom_token"):
+        provider["custom_token"] = old_provider.get("custom_token", "")
+    security = new_cfg.setdefault("security", {})
+    security.pop("password_set", None)
+    if not security.get("password_hash"):
+        security["password_hash"] = old_cfg["security"].get("password_hash", "")
+    security.setdefault("secret", old_cfg["security"].get("secret", ""))
+    security.setdefault("webhook_token", old_cfg["security"].get("webhook_token", ""))
+    return new_cfg
