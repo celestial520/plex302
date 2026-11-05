@@ -1,5 +1,9 @@
 # Plex302 · Plex 云盘 302 直链助手
 
+[![build](https://github.com/celestial520/plex302/actions/workflows/docker.yml/badge.svg)](https://github.com/celestial520/plex302/actions/workflows/docker.yml)
+[![image](https://img.shields.io/badge/ghcr.io-plex302-blue)](https://github.com/celestial520/plex302/pkgs/container/plex302)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 strm**；外网播放时把 `/library/parts` 请求 **302** 到 115 / AList / CD2 直链，NAS 不再中转视频流量；CMS 整理完还能自动做 **Plex 局部扫描**，只入库变化的目录。
 
 > 一句话：Plex 负责刮削和播放决策，plex302 负责把“读文件”这件事甩给云盘。
@@ -166,6 +170,21 @@ docker compose up -d
    - 连接端口用 **32500**，不是 32400
 
 > Plex 的服务器发现仍可能把 32400 广播给客户端。最稳的是在客户端里手动添加 `NAS:32500`，或在 Plex 设置里填「自定义服务器访问 URL」。
+
+---
+
+## 从 plex-demo 迁移
+
+之前用过 `registry.cn-hangzhou.aliyuncs.com/nanfeng_super/plex-demo` 那套 compose 的，换镜像即可，注意这几处差异：
+
+| 旧写法 | 新写法 | 说明 |
+|---|---|---|
+| `./config:/shared-config` | `./config:/config` | 配置目录变了，且数据结构不兼容，建议重新配一遍（几分钟） |
+| `PUID` / `PGID` | 不需要 | 容器内以 root 运行，只读写 `./config` 和 `/var/log/nginx` |
+| `- ./strm:/strm` | 不需要 | 不生成 strm，这一行可以删掉 |
+| `NGINX_PORT` / `WEBUI_PORT` / `TZ` | 保持不变 | 同名环境变量依旧生效 |
+
+端口、host 网络、`./log:/var/log/nginx` 都不用改。
 
 ---
 
@@ -348,12 +367,30 @@ docker compose up -d --build
 ```
 
 镜像：`ghcr.io/celestial520/plex302:latest`（amd64 + arm64）。
-推 `main` 或打 `v*` tag 会自动构建（`.github/workflows/docker.yml`）。
+推 `main` 或打 `v*` tag 会自动构建（`.github/workflows/docker.yml`）：先跑冒烟测试（容器能不能起来、nginx 和 njs 是否正常、`/library/parts` 拦截有没有走通），通过后才推镜像。
 
 国内构建加速：
 
 ```bash
 docker build --build-arg APT_MIRROR=mirrors.aliyun.com -t plex302 .
+```
+
+### 项目结构
+
+```text
+app/                 FastAPI 后端
+  main.py            路由、鉴权中间件、Webhook
+  plex.py            Plex API（局部扫描、parts 查路径、decision）
+  cd2.py             CloudDrive2 gRPC（刷缓存、取直链）
+  u115.py            115 开放平台（设备码授权、直链、token 续期）
+  providers.py       直链来源：115 / CD2 / AList / 自定义
+  resolver.py        路径映射 + 局域网判断 + 直链缓存
+  scanner.py         扫描队列（去重、最长前缀匹配媒体库）
+  watcher.py         目录轮询，发现新文件后推导要扫的目录
+nginx/
+  plex302.js         njs：拦截 /library/parts、decision 改写、302 或回源
+  plex302.conf.template  站点模板（端口由 entrypoint 注入）
+tests/mock_plex.py   假 Plex + 假 CDN，本地联调用
 ```
 
 ---

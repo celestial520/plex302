@@ -42,4 +42,7 @@ RUN chmod +x /entrypoint.sh \
 VOLUME ["/config"]
 EXPOSE 32500 999
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS -o /dev/null "http://127.0.0.1:${WEBUI_PORT}/login" || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]
