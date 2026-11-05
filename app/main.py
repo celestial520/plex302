@@ -585,6 +585,16 @@ async def api_ingest(request: Request) -> Any:
     result = await asyncio.to_thread(ingest.ingest, text, None, bool(body.get("organize", True)))
     if not result.get("ok"):
         return _err(str(result.get("error") or "入库失败"))
+    # 转存/离线是异步落盘的，等一会儿再整理；dry_run 由配置决定，不在这里强行真跑
+    if body.get("organize", True) and config.load()["organize"].get("enabled"):
+        async def _later() -> None:
+            await asyncio.sleep(20)
+            try:
+                await asyncio.to_thread(organize.organizer.run, None, 0)
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"[入库] 自动整理跳过：{err}")
+
+        asyncio.create_task(_later())
     return _ok(result)
 
 

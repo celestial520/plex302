@@ -255,10 +255,10 @@ jobs:
             -d '{"dry_run":false}' http://127.0.0.1:999/api/organize/run)
           echo "执行 $org"
           echo "$org" | grep -q '"done": *2' || { echo "::error::整理没有完成两个文件"; exit 1; }
-          movie=$(curl -s -m 20 -b cookie.txt 'http://127.0.0.1:999/api/115/browse?path=/媒体/电影')
+          movie=$(curl -s -m 20 -b cookie.txt -G --data-urlencode 'path=/媒体/电影' 'http://127.0.0.1:999/api/115/browse')
           echo "电影目录 $movie"
           echo "$movie" | grep -q '沙丘2 (2024)' || { echo "::error::电影没有归档到 /媒体/电影"; exit 1; }
-          tv=$(curl -s -m 20 -b cookie.txt 'http://127.0.0.1:999/api/115/browse?path=/媒体/剧集')
+          tv=$(curl -s -m 20 -b cookie.txt -G --data-urlencode 'path=/媒体/剧集' 'http://127.0.0.1:999/api/115/browse')
           echo "剧集目录 $tv"
           echo "$tv" | grep -q '三体 (2023)' || { echo "::error::剧集没有归档到 /媒体/剧集"; exit 1; }
 

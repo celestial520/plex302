@@ -236,10 +236,15 @@ def _run_ingest(text: str, user: str) -> None:
     if cfg["organize"].get("enabled"):
         # 给 115 一点落盘时间，再自动整理
         time.sleep(20)
-        _run_organize(False, user, trigger="入库后自动整理")
+        _run_organize(None, user, trigger="入库后自动整理")
 
 
-def _run_organize(dry: bool, user: str, trigger: str = "") -> None:
+def _run_organize(dry: Optional[bool], user: str, trigger: str = "") -> None:
+    cfg = config.load()
+    forced = dry is False and bool(cfg["organize"].get("dry_run"))
+    if forced:
+        # 设置里还是「只预演」，微信里说「整理」也不越过这个开关
+        dry = True
     summary = organize.organizer.run(dry_run=dry)
     lines = [
         f"计划 {summary['planned']} · 完成 {summary['done']} · 跳过 {summary['skipped']} · 失败 {summary['failed']}",
@@ -252,5 +257,7 @@ def _run_organize(dry: bool, user: str, trigger: str = "") -> None:
             lines.append(f"· {name}：{row['reason']}")
     if len(summary.get("items") or []) > 12:
         lines.append(f"…… 还有 {len(summary['items']) - 12} 条")
-    title = "Plex302 · 整理预演" if dry else "Plex302 · 整理完成"
+    title = "Plex302 · 整理预演" if summary.get("dry_run") else "Plex302 · 整理完成"
+    if forced:
+        lines.append("（当前设置是「只预演」，没有真的移动文件）")
     notify.send_wecom(title, "\n".join(lines) + (f"\n（{trigger}）" if trigger else ""), force=True)
