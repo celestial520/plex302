@@ -100,15 +100,16 @@ class CdnHandler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，CI 里用 0.0.0.0 让容器能访问")
     parser.add_argument("--port", type=int, default=32401)
     parser.add_argument("--cdn-port", type=int, default=32402)
     args = parser.parse_args()
     threading.Thread(
-        target=ThreadingHTTPServer(("127.0.0.1", args.cdn_port), CdnHandler).serve_forever,
+        target=ThreadingHTTPServer((args.host, args.cdn_port), CdnHandler).serve_forever,
         daemon=True,
     ).start()
-    print(f"mock plex on {args.port}, mock cdn on {args.cdn_port}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", args.port), PlexHandler).serve_forever()
+    print(f"mock plex on {args.host}:{args.port}, mock cdn on {args.host}:{args.cdn_port}", flush=True)
+    ThreadingHTTPServer((args.host, args.port), PlexHandler).serve_forever()
 
 
 if __name__ == "__main__":

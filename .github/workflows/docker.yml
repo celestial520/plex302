@@ -36,6 +36,7 @@ jobs:
           set -e
           mkdir -p "${PWD}/smoke-config"
           docker run -d --name p302 \
+            --add-host host.docker.internal:host-gateway \
             -e TZ=Asia/Shanghai \
             -e NGINX_PORT=32500 \
             -e WEBUI_PORT=999 \
@@ -72,6 +73,44 @@ jobs:
           [ "$api" = "401" ] || { echo "::error::未登录访问 /api/status 应为 401"; exit 1; }
           [ "$plex" = "502" ] || { echo "::error::Plex 代理应回源失败 502"; exit 1; }
           [ "$part" = "502" ] || { echo "::error::播放拦截在无 Plex 时应 502（500 代表 njs 异常）"; exit 1; }
+
+      - name: 端到端 302（假 Plex + 假直链）
+        run: |
+          set -e
+          python3 tests/mock_plex.py --host 0.0.0.0 --port 32401 --cdn-port 32402 &
+          sleep 2
+
+          # 登录拿 cookie，把 Plex 指向假 Plex，直链走自定义接口
+          curl -s -c cookie.txt -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"admin"}' http://127.0.0.1:999/api/login
+          curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
+
+          python3 - <<'PY'
+          import json
+          cfg = json.load(open("cfg.json"))["data"]
+          cfg["plex"]["url"] = "http://host.docker.internal:32401"
+          cfg["plex"]["token"] = "mock"
+          cfg["provider"]["type"] = "custom"
+          cfg["provider"]["custom_url"] = "http://host.docker.internal:32402/link"
+          json.dump(cfg, open("cfg2.json", "w"))
+          PY
+
+          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            --data-binary @cfg2.json http://127.0.0.1:999/api/config
+          echo
+          sleep 4  # 等 njs 热加载 runtime.json
+
+          echo "--- 外网请求应 302 到直链 ---"
+          curl -s -D headers.txt -o /dev/null -H 'X-Forwarded-For: 8.8.8.8' \
+            'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+          grep -iE '^(HTTP/1.1 302|Location:|X-Plex302:)' headers.txt || { echo "::error::外网请求没有返回 302"; cat headers.txt; exit 1; }
+          grep -qi 'dune.mkv' headers.txt || { echo "::error::Location 不是直链"; exit 1; }
+
+          echo "--- 内网请求应回源 Plex ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.168.1.9' \
+            'http://127.0.0.1:32500/library/parts/123/1/file.mkv')
+          echo "内网状态码=$code"
+          [ "$code" = "200" ] || { echo "::error::内网应回源 200"; exit 1; }
 
       - name: 输出日志
         if: always()
