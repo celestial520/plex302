@@ -1,14 +1,17 @@
-"""115 网页版（Cookie）接口。
+"""115 网页版（Cookie）接口 —— 直链、目录、最近文件全靠 Cookie。
 
-开放平台（proapi）没有“最近文件”能力，而 CMS 整理完是否入库，
-最可靠的信号就是 115 服务端的文件变动。这里用网页版接口补上：
-
+不再依赖 115 开放平台：
+  GET /files/download?pick_code=<pc>   取文件直链（file_url，和请求 UA 绑定）
+  GET /files?aid=1&cid=<cid>           列目录 / 返回 path 链路，可拼出完整路径
   GET /files/recent?limit=N&offset=0   最近变化的文件（按时间倒序）
-  GET /files?aid=1&cid=<cid>           返回 path 链路，可拼出完整目录
 
 Cookie 从浏览器 F12 → Network → 任意 webapi.115.com 请求里复制，
 形如 `UID=xxx; CID=yyy; SEID=zzz; KID=www`。
 Cookie 失效时 115 会返回 HTTP 405，这里统一转成可读错误。
+
+两个坑（踩过）：
+1. cid 是 64 位整数，全程必须当字符串传，转成 float 会丢精度，接口直接报“服务器开小差”
+2. 直链绑定请求 UA，取链接时的 UA 必须和播放器的一致（默认跟随客户端 UA）
 """
 from __future__ import annotations
 
@@ -101,6 +104,41 @@ def _get(
     return payload
 
 
+def _get_with_ua(
+    cfg: Dict[str, Any],
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    ua: str = "",
+    timeout: int = 20,
+) -> Dict[str, Any]:
+    """和 _get 一样，但可以指定 UA —— 115 直链和请求 UA 绑定。"""
+    url = BASE + path
+    headers = {
+        "Cookie": _cookie(cfg),
+        "User-Agent": ua or DEFAULT_UA,
+        "Referer": "https://115.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+    try:
+        resp = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
+    except requests.RequestException as err:
+        raise Web115Error(f"请求 115 失败：{err}") from err
+    if resp.status_code == 405:
+        raise Web115Error("115 Cookie 已失效（405），请重新从浏览器复制")
+    if resp.status_code != 200:
+        raise Web115Error(f"115 返回 HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError as err:
+        raise Web115Error("115 返回的不是 JSON，Cookie 可能已失效") from err
+    if not isinstance(payload, dict):
+        raise Web115Error("115 返回格式异常")
+    errno = payload.get("errno") or payload.get("errNo") or 0
+    if payload.get("state") is False and errno in EXPIRE_ERRNOS:
+        raise Web115Error("115 Cookie 已失效，请重新复制")
+    return payload
+
+
 def _pick(item: Dict[str, Any], *keys: str, default: Any = "") -> Any:
     for key in keys:
         if key in item and item[key] not in (None, ""):
@@ -128,6 +166,155 @@ def _norm_item(raw: Dict[str, Any]) -> Dict[str, Any]:
         "ctime": ctime,
         "is_dir": bool(_pick(raw, "is_dir", "is_folder", default=False)),
     }
+
+
+# ------------------------------------------------------------------ 目录 / 直链
+DIR_TTL = 300.0
+PICK_TTL = 1800.0
+
+_dir_cache: Dict[str, Dict[str, Any]] = {}
+_pick_cache: Dict[str, Dict[str, Any]] = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_get(store: Dict[str, Dict[str, Any]], key: str, ttl: float) -> Optional[Any]:
+    now = time.time()
+    with _cache_lock:
+        item = store.get(key)
+        if item and now - item["at"] < ttl:
+            return item["value"]
+        if item:
+            store.pop(key, None)
+    return None
+
+
+def _cache_set(store: Dict[str, Dict[str, Any]], key: str, value: Any) -> None:
+    with _cache_lock:
+        if len(store) > 20000:
+            store.clear()
+        store[key] = {"value": value, "at": time.time()}
+
+
+def list_dir(cfg: Dict[str, Any], cid: str, force: bool = False) -> List[Dict[str, Any]]:
+    """列一个目录（cid 必须是字符串）。"""
+    cid = str(cid or "0")
+    if not force:
+        cached = _cache_get(_dir_cache, cid, DIR_TTL)
+        if cached is not None:
+            return cached
+    items: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        payload = _get(
+            cfg,
+            "/files",
+            {
+                "aid": 1, "cid": cid, "show_dir": 1, "limit": 1000, "offset": offset,
+                "o": "user_ptime", "asc": 0, "natsort": 1, "fc_mix": 0, "format": "json",
+            },
+        )
+        data = payload.get("data")
+        if isinstance(data, dict):
+            data = data.get("list") or data.get("data") or []
+        if not isinstance(data, list) or not data:
+            break
+        items.extend(x for x in data if isinstance(x, dict))
+        total = int(payload.get("count") or payload.get("total") or 0)
+        offset += len(data)
+        if len(data) < 1000 or (total and offset >= total):
+            break
+    _cache_set(_dir_cache, cid, items)
+    return items
+
+
+def _norm_name(text: str) -> str:
+    return str(text or "").strip().replace("\u3000", " ").lower()
+
+
+def _match(items: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+    target = _norm_name(name)
+    for item in items:
+        if _norm_name(_pick(item, "n", "file_name", "name")) == target:
+            return item
+    return None
+
+
+def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
+    """云盘绝对路径 -> {pick_code, name, size}。
+
+    逐级列目录比“按文件名搜索”可靠：115 允许同名文件存在不同目录。
+    """
+    path = "/" + str(cloud_path or "").strip("/")
+    if path == "/":
+        raise Web115Error("路径为空")
+    cached = _cache_get(_pick_cache, path, PICK_TTL)
+    if cached is not None:
+        return cached
+
+    parts = [p for p in path.strip("/").split("/") if p]
+    cid = "0"
+    node: Optional[Dict[str, Any]] = None
+    for index, part in enumerate(parts):
+        items = list_dir(cfg, cid)
+        node = _match(items, part)
+        if node is None:
+            # 目录里东西太多时试一次强制刷新，避免缓存里是旧的
+            items = list_dir(cfg, cid, force=True)
+            node = _match(items, part)
+        if node is None:
+            raise Web115Error(f"115 里找不到路径：{'/' + '/'.join(parts[: index + 1])}")
+        if index < len(parts) - 1:
+            sub = str(_pick(node, "cid", "id", default=""))
+            if not sub:
+                raise Web115Error(f"{part} 不是目录")
+            cid = sub
+
+    if node is None:
+        raise Web115Error("路径为空")
+    pc = str(_pick(node, "pc", "pick_code", "pickcode"))
+    if not pc:
+        raise Web115Error("115 没有返回 pick_code（可能是目录）")
+    info = {
+        "pick_code": pc,
+        "name": str(_pick(node, "n", "file_name", "name")),
+        "size": int(_pick(node, "s", "file_size", "size", default=0) or 0),
+    }
+    _cache_set(_pick_cache, path, info)
+    return info
+
+
+def download_url(cfg: Dict[str, Any], pick_code: str, ua: str = "") -> str:
+    """用 pick_code 换直链。返回的 URL 和请求时的 UA 绑定。"""
+    if not pick_code:
+        raise Web115Error("pick_code 为空")
+    params = {"pick_code": pick_code}
+    payload = _get_with_ua(cfg, "/files/download", params, ua)
+    data = payload.get("data")
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        data = {}
+    url = str(data.get("file_url") or data.get("url") or "")
+    if not url and "state" in payload and not payload.get("state"):
+        # 少数版本参数名是 pickcode（没有下划线）
+        payload = _get_with_ua(cfg, "/files/download", {"pickcode": pick_code}, ua)
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        url = str(data.get("file_url") or data.get("url") or "")
+    if not url:
+        raise Web115Error("115 没有返回直链（pick_code 可能已失效）")
+    return url
+
+
+def file_url_by_path(cfg: Dict[str, Any], cloud_path: str, ua: str = "") -> Dict[str, Any]:
+    """云盘路径 -> 直链（Cookie 模式，替代原来的开放平台接口）。"""
+    info = resolve_file(cfg, cloud_path)
+    url = download_url(cfg, info["pick_code"], ua)
+    return {"url": url, "name": info["name"], "pick_code": info["pick_code"]}
+
+
+def clear_file_cache() -> None:
+    with _cache_lock:
+        _pick_cache.clear()
 
 
 def recent(cfg: Dict[str, Any], limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
@@ -183,13 +370,21 @@ def folder_path(cfg: Dict[str, Any], cid: str) -> str:
 
 
 def test(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """测试 Cookie：既拉最近文件，也反查一次目录路径，确认整条链路可用。"""
+    """测试 Cookie：最近文件 + 操作事件 + 目录反查 + 取一次直链。"""
     items = recent(cfg, limit=5)
     sample = items[0] if items else None
     path = ""
     if sample and sample.get("cid"):
         path = folder_path(cfg, sample["cid"]).rstrip("/") + "/" + sample["name"]
-    return {"ok": True, "count": len(items), "sample": sample, "path": path}
+    result: Dict[str, Any] = {"ok": True, "count": len(items), "sample": sample, "path": path}
+    # 顺手验证「路径 -> pick_code -> 直链」这条真正的播放链路
+    if path and sample and not sample.get("is_dir"):
+        try:
+            link = file_url_by_path(cfg, path, DEFAULT_UA)
+            result["link"] = {"pick_code": link["pick_code"], "url": link["url"][:120] + "…"}
+        except Web115Error as err:
+            result["link_error"] = str(err)
+    return result
 
 
 def self_test() -> Dict[str, Any]:

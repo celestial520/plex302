@@ -90,7 +90,7 @@
         <div>
           <div class="hero-badge">DIRECT PLAY · 302 · 增量入库</div>
           <h2>外网播放，不再经过 NAS 中转</h2>
-          <p>Plex 通过 CD2 挂载扫描入库；外网客户端起播时，服务把 <code>/library/parts</code> 请求 302 到云盘直链。局域网仍然回源 Plex，转码和字幕都不受影响。CMS 整理完由 115 操作事件触发局部扫描，每天再全库扫一遍兜底。</p>
+          <p>Plex 通过 CD2 挂载扫描入库；起播时把 <code>/library/parts</code> 请求 302 到 115 直链。默认外网走 302、内网回源 Plex；在「设置 → 网络与安全」打开<b>局域网也 302</b> 后，电视在内网也直接从云盘拉流，NAS 完全不上行。CMS 整理完由 115 操作事件触发局部扫描，每天再全库扫一遍兜底。</p>
         </div>
         <div class="hero-actions">
           <button class="btn primary" id="btn-hero-scan"><svg><use href="#i-scan"></use></svg>扫描路径</button>
@@ -118,7 +118,7 @@
         <div class="stat">
           <div class="label">待扫目录</div>
           <div class="value" id="stat-pending">0</div>
-          <div class="sub" id="stat-pending-sub">事件静置中</div>
+          <div class="sub" id="stat-pending-sub">静置 90 秒后入队</div>
         </div>
       </div>
 
@@ -147,7 +147,7 @@
       <div class="grid-2">
         <div class="panel">
           <div class="panel-head">
-            <div><h3>115 最近操作</h3><span class="hint">App 里的上传 / 移动 / 改名 / 复制 / 删除</span></div>
+            <div><h3>115 增量入库</h3><span class="hint">读 App 里的「最近操作」：上传 / 移动 / 改名 / 复制 / 删除</span></div>
             <button class="btn ghost sm" id="btn-events-run"><svg><use href="#i-refresh"></use></svg>立即检查</button>
           </div>
           <div class="panel-body" style="padding-top:2px">
@@ -162,6 +162,22 @@
             <div class="desc" style="margin-top:8px;font-size:11px;color:var(--muted-2);line-height:1.6">
               建议每天凌晨自动跑一次（设置 → 全量同步）。增量漏了，这一步也能补回来。
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <div><h3>CD2 目录监听（兜底，默认关闭）</h3><span class="hint">打开后按间隔遍历 CD2 挂载目录找新文件；因为挂在 115 上，频繁遍历会增加风控概率</span></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn ghost sm" id="btn-watch-run"><svg><use href="#i-scan"></use></svg>立即跑一轮</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="watch-status"><div class="empty">未启用</div></div>
+          <div class="desc" style="margin-top:10px;font-size:12px;color:var(--muted-2);line-height:1.7">
+            这条链路和 115 操作事件是<b>两套独立机制</b>：事件是「115 告诉你发生了什么」，目录监听是「自己去翻目录」。
+            有事件时不需要它；只有当 Cookie 失效、或事件接口抽风时才建议临时打开。间隔在「设置 → CD2 目录监听」里单独设置。
           </div>
         </div>
       </div>

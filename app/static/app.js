@@ -13,7 +13,6 @@
     events: [],
     tab: 'overview',
     timers: {},
-    qrTimer: null,
   };
 
   const THEME_KEY = 'p302-theme';
@@ -77,7 +76,7 @@
 
   function setPill(id, ok, text) {
     const el = $(id);
-    el.className = 'pill ' + (ok ? 'ok' : 'bad');
+    el.className = 'pill ' + (ok === 'idle' ? 'idle' : (ok ? 'ok' : 'bad'));
     el.innerHTML = '<i class="dot"></i>' + esc(text);
   }
 
@@ -215,8 +214,8 @@
     const cd2 = s.cd2 || {};
 
     setPill('#pill-plex', !!plex.ok, plex.ok ? 'Plex 已连接' : 'Plex 未连接');
-    setPill('#pill-115', !!u115.authorized, u115.authorized ? '115 已授权' : '115 未授权');
-    setPill('#pill-cd2', !!cd2.ok, cd2.ok ? 'CD2 已连接' : 'CD2 未连接');
+    setPill('#pill-115', !!u115.cookie_set, u115.cookie_set ? '115 Cookie 已配置' : '115 未配置');
+    setPill('#pill-cd2', cd2.ok ? true : 'idle', cd2.ok ? 'CD2 已连接' : 'CD2 未连接');
 
     const stats = s.stats || {};
     const today = stats.today || {};
@@ -239,16 +238,19 @@
     const full = s.full || {};
     const rows = [
       ['Plex 服务器', plex.ok ? `v${plex.version || ''} · ${plex.name || ''}` : (plex.error || '未连接'), plex.ok, '#i-play'],
-      ['115 开放平台', u115.authorized ? `${u115.user_name || '已授权'} · token 有效` : '未授权，外网 302 不可用', !!u115.authorized, '#i-link'],
+      ['115 直链（Cookie）', u115.cookie_set ? 'Cookie 已配置 · 外网 / 内网 302 可用' : '未配置 Cookie，全部回源 Plex', !!u115.cookie_set, '#i-link'],
       ['115 操作事件', !ev.cookie_set ? '未配置 Cookie（设置 → 115 授权）'
         : (evSummary.first_run ? '已记录游标，等待新事件'
           : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')),
         !!ev.cookie_set && evSummary.ok !== false, '#i-events'],
-      ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : (cd2.message || '未连接'), !!cd2.ok, '#i-scan'],
-      ['目录监听', watch.enabled === false ? '已关闭' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled !== false, '#i-logs'],
+      ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
+      ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
-      ['企业微信', (s.notify && s.notify.wecom) ? '已启用 · 入库 / 全量 / 错误都会通知' : '未启用（设置 → 通知）', (s.notify && s.notify.wecom) ? true : 'idle', '#i-bell'],
+      ['企业微信', (s.notify && s.notify.wecom) ? '已启用 · 增量入库 / 全量 / 错误都会通知' : '未启用（设置 → 通知）', (s.notify && s.notify.wecom) ? true : 'idle', '#i-bell'],
+      ['局域网直连', s.lan_redirect ? '已开启 · 电视也直接从云盘拉流' : '未开启 · 内网走 NAS 中转（设置 → 网络与安全）', s.lan_redirect ? true : 'idle', '#i-home'],
     ];
+    renderWatchStatus(watch, s);
+
     $('#status-list').innerHTML = rows.map((r) => {
       const state = r[2] === 'idle'
         ? '<span class="badge">未启用</span>'
@@ -260,6 +262,28 @@
         <div class="status-val">${state}</div>
       </div>`;
     }).join('');
+  }
+
+  function renderWatchStatus(watch, s) {
+    const box = $('#watch-status');
+    if (!box) return;
+    const on = s.scan_watch_on;
+    if (!on) {
+      box.innerHTML = '<div class="callout">未启用。日常入库靠 115 操作事件就够了；需要兜底时到「设置 → CD2 目录监听」打开。</div>';
+      return;
+    }
+    if (!watch || !watch.at) {
+      box.innerHTML = '<div class="callout info">已启用，等待首轮遍历…</div>';
+      return;
+    }
+    box.innerHTML = `<div class="watch-facts">
+      <div><span>上轮</span><b>${fmtTime(watch.at)}</b></div>
+      <div><span>根目录</span><b>${watch.targets || 0}</b></div>
+      <div><span>视频文件</span><b>${watch.files || 0}</b></div>
+      <div><span>新增</span><b>${watch.new || 0}</b></div>
+      <div><span>入队</span><b>${watch.queued || 0}</b></div>
+      <div><span>耗时</span><b>${watch.elapsed != null ? watch.elapsed + 's' : '—'}</b></div>
+    </div>${watch.first_run ? '<div class="desc" style="margin-top:8px;font-size:11px;color:var(--muted-2)">首次运行只建索引，不触发扫描。</div>' : ''}`;
   }
 
   function renderOverviewScans() {
@@ -469,22 +493,27 @@
       <div class="form-body ${single ? 'single' : ''}">${body}</div></div>`;
   }
 
-  // 点一下就能选的数字输入（带常用值下拉）
-  function combo(id, value, presets, unit) {
-    unit = unit || '秒';
-    const options = (presets || []).map((v) => {
-      let label = `${v} ${unit}`;
-      if (unit === '秒') {
-        if (v >= 3600) label = `${v / 3600} 小时`;
-        else if (v >= 60) label = v % 60 === 0 ? `${v / 60} 分钟` : `${Math.floor(v / 60)} 分 ${v % 60} 秒`;
-      }
-      return `<button type="button" data-value="${v}"><span>${label}</span><small>${v} ${unit}</small></button>`;
-    }).join('');
-    return `<div class="combo" data-combo>
-      <input class="input" id="${id}" type="number" inputmode="numeric" value="${esc(value == null ? '' : value)}">
-      <button type="button" class="combo-arrow" tabindex="-1" aria-label="选择常用值"><svg><use href="#i-chevron"></use></svg></button>
-      <div class="combo-menu">${options}</div>
+  // 数字 + 单位（分钟/小时），和 115 秒传助手里的时间设置一样：想填多少填多少
+  function dur(id, seconds) {
+    const total = Math.max(60, Number(seconds) || 60);
+    const useHour = total >= 3600 && total % 3600 === 0;
+    const value = useHour ? total / 3600 : Math.max(1, Math.round(total / 60));
+    return `<div class="dur">
+      <input class="input" id="${id}" type="number" min="1" step="1" value="${value}">
+      <select id="${id}-unit">
+        <option value="60" ${useHour ? '' : 'selected'}>分钟</option>
+        <option value="3600" ${useHour ? 'selected' : ''}>小时</option>
+      </select>
     </div>`;
+  }
+
+  function durValue(id, fallback) {
+    const el = $('#' + id);
+    const unit = $('#' + id + '-unit');
+    const num = Number((el && el.value) || 0);
+    const mul = Number((unit && unit.value) || 60);
+    const seconds = Math.round(num * mul);
+    return seconds > 0 ? seconds : fallback;
   }
 
   function renderSettings() {
@@ -499,8 +528,20 @@
         <button class="icon-btn mount-del" title="删除"><svg><use href="#i-trash"></use></svg></button>
       </div>`).join('');
 
-    const u115 = state.status && state.status.u115 || {};
+    const u115 = (state.status && state.status.u115) || {};
+    const embyToken = (c.security && c.security.emby_token) || '';
     const html = `
+      ${section('外观', '自动跟随系统，也可以固定浅色 / 深色。只保存在当前浏览器。', `
+        <div class="field full">
+          <div class="seg" data-theme-seg>
+            <button type="button" data-mode="auto"><svg><use href="#i-auto"></use></svg>自动</button>
+            <button type="button" data-mode="light"><svg><use href="#i-sun"></use></svg>浅色</button>
+            <button type="button" data-mode="dark"><svg><use href="#i-moon"></use></svg>深色</button>
+          </div>
+          <span class="desc">手机上自动启用底部导航和卡片式列表。</span>
+        </div>
+      `, true)}
+
       ${section('Plex 连接', 'Plex 的地址必须能从本容器访问。host 网络下通常是 <code>http://127.0.0.1:32400</code>。', `
         <div class="field"><label>Plex 地址</label>${input('cfg-plex-url', c.plex.url, 'http://127.0.0.1:32400')}</div>
         <div class="field"><label>X-Plex-Token</label>${input('cfg-plex-token', '', c.plex.token_set ? '已保存，留空不修改' : '在 Plex Web 的 URL 里找 X-Plex-Token', 'password')}
@@ -508,23 +549,18 @@
         <div class="field full"><div class="field-row"><button class="btn sm" id="btn-test-plex">测试 Plex</button><span class="desc" id="plex-test-result"></span></div></div>
       `)}
 
-      ${section('115 授权', '走 115 开放平台设备码，扫码后 token 自动续期。只有外网 302 需要它。', `
+      ${section('115（Cookie）', '302 直链、操作事件、最近文件全部走同一个网页 Cookie，不再需要开放平台扫码。', `
         <div class="field full">
-          <div class="callout ${u115.authorized ? 'info' : ''}">
-            当前状态：<b>${u115.authorized ? esc(u115.user_name || '已授权') : '未授权'}</b>
-            ${u115.authorized ? ' · token 会在过期前自动刷新' : ' · 点右侧「扫码登录 115」'}
+          <div class="callout ${u115.cookie_set ? 'info' : ''}">
+            当前状态：<b>${u115.cookie_set ? 'Cookie 已保存（' + esc(u115.cookie_hint || '') + '）' : '未配置'}</b>
+            ${u115.cookie_set ? ' · 直链和增量入库都可用' : ' · 不填也能用，只是不走 115 直链、也没有事件'}
           </div>
         </div>
-        <div class="field full"><div class="field-row">
-          <button class="btn primary sm" id="btn-115-qr"><svg><use href="#i-qr"></use></svg>扫码登录 115</button>
-          ${u115.authorized ? '<button class="btn sm danger" id="btn-115-logout">退出登录</button>' : ''}
-          <button class="btn sm" id="btn-115-check">刷新状态</button>
-        </div></div>
-        <div class="field full" style="margin-top:18px">
-          <label>115 网页 Cookie <span class="muted">（增量入库必需）</span></label>
+        <div class="field full">
+          <label>115 网页 Cookie</label>
           <textarea class="input" id="cfg-115-cookie" rows="3" placeholder="${c.u115.cookie_set ? '已保存（' + esc(c.u115.cookie_hint || '') + '），留空不修改' : 'UID=...; CID=...; SEID=...'}"></textarea>
-          <span class="desc">浏览器登录 <code>115.com</code> → F12 → Network → 随便点一个 <code>webapi.115.com</code> 请求 → 复制请求头里的 Cookie。
-          它用来读 115 的「最近操作」：CMS 整理完是移动 / 改名 / 复制，plex302 立刻就能知道，比等目录刷新可靠。</span>
+          <span class="desc">浏览器登录 <code>115.com</code> → F12 → Network → 点任意一个 <code>webapi.115.com</code> 请求 → 复制请求头里的整行 Cookie。
+          这一个 Cookie 同时用于：<b>取直链</b>（<code>/files/download</code>）、<b>读最近操作</b>（<code>/behavior/detail</code>）、<b>反查目录</b>（<code>/files</code>）。</span>
         </div>
         <div class="field full"><div class="field-row">
           <button class="btn sm" id="btn-115-cookie-test">测试 Cookie</button>
@@ -532,13 +568,14 @@
         </div></div>
       `, true)}
 
-      ${section('CloudDrive2', 'CD2 只用于「挂载给 Plex 扫描」和「刷新目录缓存」；gRPC 端口默认 19798。', `
+      ${section('CloudDrive2', 'CD2 只做「给 Plex 挂载」和「刷目录缓存」。<b>API Token 可以留空</b>：不填就跳过缓存刷新，Plex 照样能扫到文件。', `
         <div class="field"><label>gRPC 地址</label>${input('cfg-cd2-address', c.cd2.address, '127.0.0.1:19798')}</div>
-        <div class="field"><label>API Token</label>${input('cfg-cd2-token', '', c.cd2.token_set ? '已保存，留空不修改' : 'CD2 后台 → 设置 → API Token', 'password')}</div>
+        <div class="field"><label>API Token（可选）</label>${input('cfg-cd2-token', '', c.cd2.token_set ? '已保存，留空不修改' : '不填也行，只是不刷新 CD2 缓存', 'password')}
+          <span class="desc">CD2 后台 → 设置 → API Token。填了会在扫描前强制刷新目录，避免 CD2 缓存看不到刚整理的文件。</span></div>
         <div class="field full"><div class="field-row"><button class="btn sm" id="btn-test-cd2">测试 CD2</button><span class="desc" id="cd2-test-result"></span></div></div>
       `)}
 
-      ${section('路径映射', '把 Plex 看到的本地挂载路径，映射成云盘路径（给 115/AList 用）和 CD2 内部路径（给刷新缓存用）。三列都支持留空。', `
+      ${section('路径映射', '把 Plex 看到的本地挂载路径，映射成云盘路径（给 115 用）和 CD2 内部路径（给刷新缓存用）。三列都支持留空。', `
         <div class="field full">
           <div class="callout info">例：Plex 里是 <code>/mnt/cd2/115/电影/沙丘2</code>，115 网盘根目录对应 <code>/</code>，CD2 内部是 <code>/115/电影/沙丘2</code>：
           <br>Plex 前缀 <code>/mnt/cd2/115</code> · 云盘前缀 <code>/</code> · CD2 前缀 <code>/115</code>。</div>
@@ -547,10 +584,10 @@
         <div class="field full"><button class="btn sm" id="btn-add-mount"><svg><use href="#i-plus"></use></svg>添加一条映射</button></div>
       `, true)}
 
-      ${section('直链方式', '决定 302 的目标从哪里来。115 最稳；CD2 需要直链权限；AList 适合混合网盘。', `
+      ${section('直链方式', '决定 302 的目标从哪里来。115 走 Cookie，最省事；CD2 需要直链权限；AList 适合混合网盘。', `
         <div class="field"><label>直链来源</label>
           <select id="cfg-provider">
-            ${[['115', '115 开放平台（推荐）'], ['cd2', 'CloudDrive2 直链'], ['alist', 'AList / OpenList'], ['custom', '自定义 HTTP 接口'], ['none', '不 302，全部回源 Plex']]
+            ${[['115', '115（网页 Cookie，推荐）'], ['cd2', 'CloudDrive2 直链'], ['alist', 'AList / OpenList'], ['custom', '自定义 HTTP 接口'], ['none', '不 302，全部回源 Plex']]
               .map((x) => `<option value="${x[0]}" ${c.provider.type === x[0] ? 'selected' : ''}>${x[1]}</option>`).join('')}
           </select>
         </div>
@@ -561,8 +598,6 @@
           </select>
         </div>
         <div class="field"><label>固定 UA</label>${input('cfg-fixed-ua', c.provider.fixed_ua, 'Plex302/1.0')}</div>
-        <div class="field"><label>115 Client ID</label>${input('cfg-115-client', c.provider.u115_client_id, '100197847')}
-          <span class="desc">默认是 MoviePilot 的公开应用，扫码页会显示 MoviePilot；也可换成自己的开放平台应用。</span></div>
         <div class="field full" id="alist-fields">
           <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
             <div class="field"><label>AList 地址</label>${input('cfg-alist-base', c.provider.alist_base, 'http://127.0.0.1:5244')}</div>
@@ -585,45 +620,40 @@
         </div>
       `, true)}
 
-      ${section('扫描与自动入库', '三层配合：115 操作事件（主）→ 目录监听（可选）→ 每天全量（兜底）。', `
+      ${section('增量入库（115 操作事件）', 'CMS 整理完 → 115「最近操作」出现事件 → 静置合并 → 局部扫描。这里是主通道，比轮询目录可靠得多。', `
         <div class="field full">
-          ${switchLine('启用扫描', '关闭后手动 / CMS / 事件都不会触发 Plex 扫描', 'cfg-scan-enabled', c.scan.enabled)}
-          ${switchLine('CD2 目录监听', '轮询挂载目录做兜底；库很大时可以关掉，交给 115 事件 + 全量', 'cfg-watch-enabled', c.scan.watch_enabled)}
-          ${switchLine('首次索引时也扫描', '默认只建索引，避免第一次启动就把全库扫一遍', 'cfg-first-scan', c.scan.first_run_scan)}
+          ${switchLine('启用 115 操作事件监听', '定时拉取上传 / 移动 / 改名 / 复制 / 删除流水，有新视频就局部扫描', 'cfg-events-enabled', c.events.enabled)}
+          ${switchLine('首次运行也补扫历史', '默认只记录游标，不补扫历史，避免一装好就扫全库', 'cfg-events-first', c.events.first_scan)}
         </div>
-        <div class="field"><label>目录轮询间隔</label>${combo('cfg-interval', c.scan.interval, [60, 120, 180, 300, 600, 1800])}<span class="desc">CD2 挂载目录的轮询周期。</span></div>
-        <div class="field"><label>文件静置</label>${combo('cfg-settle', c.scan.settle_seconds, [30, 60, 90, 180])}<span class="desc">文件修改时间小于这个值先跳过。</span></div>
-        <div class="field"><label>最大目录深度</label>${input('cfg-depth', c.scan.max_depth, '4', 'number')}</div>
-        <div class="field"><label>最小文件大小（MB）</label>${input('cfg-minsize', c.scan.min_size_mb, '20', 'number')}</div>
-
-        <div class="field full" style="margin-top:6px">
-          <div class="callout info">下面这组是 <b>115 操作事件</b>（就是 115 App 里的「最近操作」）：拉取上传 / 移动 / 改名 / 复制 / 删除流水，
-          游标增量、按事件 ID 去重。CMS 整理完的那一刻事件就产生了，不依赖 CD2 目录缓存。</div>
-        </div>
+        <div class="field"><label>检查间隔</label>${dur('cfg-events-interval', c.events.interval)}
+          <span class="desc">多久去 115 看一次有没有新操作。填 1 分钟就够用；想更省请求可以填 5 分钟。</span></div>
+        <div class="field"><label>&nbsp;</label><button class="btn sm" id="btn-events-run"><svg><use href="#i-events"></use></svg>立即检查</button></div>
+        <div class="field full"><span class="desc" id="events-run-result"></span></div>
         <div class="field full">
-          ${switchLine('115 操作事件监听（增量入库）', '定时拉取 115 操作流水，发现新视频就局部扫描', 'cfg-events-enabled', c.events.enabled)}
-          ${switchLine('首次运行也扫描', '默认只记录游标，不补扫历史，避免一上来扫全库', 'cfg-events-first', c.events.first_scan)}
-          ${switchLine('扫完再复核一次', '几分钟后对同一目录再扫一次，接住“扫的时候还没写完”', 'cfg-events-verify', c.events.verify_enabled)}
-          ${switchLine('最近文件兜底', '事件接口偶发空返回时，用最近文件列表补一刀', 'cfg-events-recent', c.events.recent_fallback)}
-        </div>
-        <div class="field"><label>事件检查间隔</label>${combo('cfg-events-interval', c.events.interval, [30, 60, 120, 300, 600])}</div>
-        <div class="field"><label>目录静置多久再扫</label>${combo('cfg-events-settle', c.events.settle_seconds, [60, 120, 180, 300, 600])}
-          <span class="desc">CMS 还在整理时，每来一个新事件就往后延。</span></div>
-        <div class="field"><label>单目录最长等待</label>${combo('cfg-events-maxwait', c.events.max_wait_seconds, [300, 600, 900, 1800])}
-          <span class="desc">一直有事件也不会无限等。</span></div>
-        <div class="field"><label>复核延迟</label>${combo('cfg-events-verify-delay', c.events.verify_delay, [120, 300, 600, 1800])}</div>
-        <div class="field"><label>每次拉取条数</label>${combo('cfg-events-limit', c.events.limit, [50, 100, 200, 300], '条')}</div>
-        <div class="field full"><div class="field-row">
-          <button class="btn sm" id="btn-events-run">立即检查 115</button>
-          <span class="desc" id="events-run-result"></span>
-        </div></div>
-
-        <div class="field full"><label>CMS / 外部通知 Webhook</label>
-          <div class="field-row"><input class="input" id="cfg-webhook" readonly value="${esc((state.status && state.status.webhook_url) || '')}"><button class="btn sm" id="btn-copy-hook"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc">任何能发 HTTP 的工具都能调：<code>GET ...&amp;path=/电影/xxx</code>、<code>POST {"path":"..."}</code>，或 <code>&amp;full=1</code> 直接全量。
-          CMS 的 Emby 扫库通知也能接（见下面「CMS 对接」）。</span>
+          <div class="callout info">
+            以下参数已按 115 的风控节奏固定好，不用调：<br>
+            · 同一目录静置 <b>90 秒</b> 再扫，期间每来一个新事件就重新计时（CMS 连续整理不会扫到一半）<br>
+            · 单目录最多等 <b>10 分钟</b>，避免一直有事件就永远不扫<br>
+            · 扫完 <b>3 分钟</b> 后复核一次，接住晚落盘的字幕 / 花絮<br>
+            · 每次拉 100 条、最多翻 5 页，每条事件之间留 0.6 秒，降低风控概率
+          </div>
         </div>
       `, true)}
+
+      ${section('CD2 目录监听（兜底）', '和 115 操作事件完全独立：这是“自己去翻 CD2 挂载目录”。默认关闭。', `
+        <div class="field full">
+          ${switchLine('启用 CD2 目录监听', '按间隔遍历挂载目录，发现新视频就局部扫描', 'cfg-watch-enabled', c.scan.watch_enabled)}
+        </div>
+        <div class="field"><label>遍历间隔</label>${dur('cfg-watch-interval', c.scan.interval)}
+          <span class="desc">多久翻一次目录。库大就填长一点（比如 1 小时）。</span></div>
+        <div class="field full"><button class="btn sm" id="btn-watch-run-2"><svg><use href="#i-scan"></use></svg>立即跑一轮</button></div>
+        <div class="field full">
+          <div class="callout warn">
+            CD2 挂的是 115，每翻一层目录都会产生一次 115 请求，库大时容易触发风控（405 / 403）。
+            有 115 操作事件时<b>不需要开这个</b>；建议只在 Cookie 失效、事件接口异常时临时打开。
+          </div>
+        </div>
+      `)}
 
       ${section('全量同步', '把 Plex 所有媒体库整库扫一遍。增量再稳也可能漏，这是最后的保险。', `
         <div class="field full">
@@ -636,44 +666,39 @@
       `)}
 
       ${section('通知（企业微信）', '和 115 秒传助手用同一套应用消息：CorpID + Secret + AgentID + 接收人，可选代理。', `
-        <div class="field full">${switchLine('启用企业微信通知', '入库完成、全量结果、Cookie 失效都会推送', 'cfg-wecom-enabled', c.notify.wecom_enabled)}</div>
+        <div class="field full">${switchLine('启用企业微信通知', '增量入库、全量结果、Cookie 失效都会推送', 'cfg-wecom-enabled', c.notify.wecom_enabled)}</div>
         <div class="field"><label>CorpID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, '企业微信 → 我的企业 → 企业ID')}</div>
         <div class="field"><label>AgentID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '应用详情里的 AgentId')}</div>
         <div class="field"><label>Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '应用详情里的 Secret', 'password')}</div>
-        <div class="field"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all')}<span class="desc">成员账号用 <code>|</code> 分隔，默认全体。</span></div>
+        <div class="field"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all')}<span class="desc">成员账号用竖线分隔，默认全体。</span></div>
         <div class="field full"><label>代理地址（可选）</label>${input('cfg-wecom-proxy', c.notify.wecom_proxy, 'http://proxy:8980')}<span class="desc">企业微信 API 的转发地址，只换 host、路径不变。</span></div>
         <div class="field full">
-          ${switchLine('入库通知', '一轮扫描结束后汇总成一条，避免刷屏', 'cfg-notify-scan', c.notify.on_scan)}
+          ${switchLine('增量入库通知', '一轮事件扫描结束后汇总成一条（含目录、媒体库、来源），避免刷屏', 'cfg-notify-scan', c.notify.on_scan)}
           ${switchLine('全量同步通知', '全量结束发一条汇总', 'cfg-notify-full', c.notify.on_full)}
           ${switchLine('错误通知', 'Cookie 失效 / 拉取失败，同类 30 分钟只发一次', 'cfg-notify-error', c.notify.on_error)}
         </div>
         <div class="field full"><div class="field-row"><button class="btn sm" id="btn-notify-test"><svg><use href="#i-bell"></use></svg>发送测试消息</button><span class="desc" id="notify-test-result"></span></div></div>
       `)}
 
-      ${section('CMS 对接', '两种方式，任选一种；都失效时还有 115 事件和全量兜底。', `
+      ${section('CMS 对接', 'CMS 整理完到底能不能通知 plex302：能，但要看你有没有开 strm。', `
         <div class="field full">
           <div class="callout info">
-            <b>方式一（推荐）：什么都不用配。</b> CMS 整理就是把文件移动 / 改名到 media 目录，这本身就是 115 操作事件，
-            plex302 会感知到并延迟合并扫描。<br><br>
-            <b>方式二：让 CMS 主动通知。</b> CMS 的「通知 Emby 扫库」可以把地址填成本容器：
-            <code>EMBY_HOST_PORT=http://NAS:999</code>、<code>EMBY_API_KEY=${esc((state.config && state.config.security && state.config.security.emby_token) || '')}</code>，
-            它会打 <code>/emby/Library/Refresh</code>，plex302 收到就触发全量（或单库）扫描。
+            <b>① 你开了 strm（CMS 生成 strm 后通知 Emby 扫库）</b><br>
+            把 CMS 的 <code>EMBY_HOST_PORT</code> 直接指向本容器，它调 <code>/emby/Library/Refresh</code> 时 plex302 就能收到：
+            <code>EMBY_HOST_PORT=http://NAS:999</code>、<code>EMBY_API_KEY=${esc(embyToken)}</code>。<br><br>
+            <b>② 你没开 strm（真实文件入库）</b><br>
+            CMS 没有通用 webhook，整理完<b>不会主动发通知</b>，这时靠上面的 115 操作事件——CMS 整理的动作本身就是事件，
+            这也是 CMS 自己增量同步用的办法。<br><br>
+            <b>③ 其它工具</b>（MoviePilot / 脚本）可以打下面这个 Webhook。
           </div>
         </div>
         <div class="field full"><label>Emby 兼容地址</label>
           <div class="field-row"><input class="input" id="cfg-emby-url" readonly value="${esc((state.status && state.status.emby_url) || '')}"><button class="btn sm" id="btn-copy-emby"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc">给 CMS / 其他只支持 Emby 通知的工具用；会校验 <code>api_key</code>。</span>
+          <span class="desc">给 CMS / 只支持 Emby 通知的工具用；会校验 <code>api_key</code>。触发的是全量同步。</span>
         </div>
-      `, true)}
-
-      ${section('外观', '自动跟随系统，也可以固定浅色 / 深色。只保存在当前浏览器。', `
-        <div class="field full">
-          <div class="seg" data-theme-seg>
-            <button type="button" data-mode="auto"><svg><use href="#i-auto"></use></svg>自动</button>
-            <button type="button" data-mode="light"><svg><use href="#i-sun"></use></svg>浅色</button>
-            <button type="button" data-mode="dark"><svg><use href="#i-moon"></use></svg>深色</button>
-          </div>
-          <span class="desc">手机上会自动启用底部导航和卡片式列表。</span>
+        <div class="field full"><label>通用 Webhook</label>
+          <div class="field-row"><input class="input" id="cfg-webhook" readonly value="${esc((state.status && state.status.webhook_url) || '')}"><button class="btn sm" id="btn-copy-hook"><svg><use href="#i-copy"></use></svg>复制</button></div>
+          <span class="desc"><code>GET ...&amp;path=/电影/xxx</code>、<code>POST {"path":"..."}</code>，或 <code>&amp;full=1</code> 直接全量。</span>
         </div>
       `, true)}
 
@@ -682,10 +707,10 @@
           <span class="desc">只用于显示 Webhook 地址和文档，不影响代理。</span></div>
         <div class="field"><label>允许 302 的局域网</label>
           <textarea id="cfg-lan" placeholder="192.168.0.0/16&#10;10.0.0.0/8">${esc((c.server.lan_cidrs || []).join('\n'))}</textarea>
-          <span class="desc">这些网段默认回源 Plex；要连内网也 302，打开下面的开关。</span></div>
+          <span class="desc">这些网段默认回源 Plex；想电视也直接连云盘，打开下面的「局域网也 302」。</span></div>
         <div class="field full">
+          ${switchLine('局域网也 302', '电视 / 盒子在内网也直接从 115 拉流，NAS 完全不上行；代价是内网也要能连公网', 'cfg-redirect-lan', c.server.redirect_lan)}
           ${switchLine('信任 X-Forwarded-For', '前面有反代/CDN 时打开；直接暴露端口时保持打开也没问题', 'cfg-trust-xff', c.server.trust_forwarded_for)}
-          ${switchLine('局域网也 302', '内网客户端也直接走云盘，NAS 完全不参与播放流量', 'cfg-redirect-lan', c.server.redirect_lan)}
           ${switchLine('强制 directPlay', '拦截 Plex decision 请求并改写 directPlay=1，尽量避免服务端转码', 'cfg-force-dp', c.advanced.force_direct_play)}
         </div>
         <div class="field full">
@@ -723,6 +748,21 @@
     }
   }
 
+  async function runWatch(btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api('/api/watch/run', { method: 'POST', body: {} });
+      const d = res.data || {};
+      toast(`目录监听：发现 ${d.new || 0} 个新文件 / 入队 ${d.queued || 0}`, 'ok');
+      await loadAll(true);
+      loadScans();
+    } catch (err) {
+      toast(err.message || '执行失败', 'bad');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   async function runFull(out) {
     try {
       await api('/api/sync/full', { method: 'POST', body: {} });
@@ -744,38 +784,6 @@
       toast(err.message, 'bad');
       if (out) out.textContent = err.message || '启动失败';
     }
-  }
-
-  function bindCombos() {
-    $$('.combo').forEach((box) => {
-      if (box.dataset.bound) return;
-      box.dataset.bound = '1';
-      const input = box.querySelector('input');
-      const mark = () => {
-        const v = String(Number(input.value));
-        box.querySelectorAll('.combo-menu button').forEach((b) => b.classList.toggle('on', b.dataset.value === v));
-      };
-      const open = () => {
-        $$('.combo.open').forEach((b) => { if (b !== box) b.classList.remove('open'); });
-        mark();
-        box.classList.add('open');
-      };
-      const close = () => box.classList.remove('open');
-      input.addEventListener('click', open);
-      input.addEventListener('focus', open);
-      box.querySelector('.combo-arrow').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (box.classList.contains('open')) close(); else open();
-      });
-      box.querySelectorAll('.combo-menu button').forEach((b) => {
-        b.addEventListener('mousedown', (e) => e.preventDefault());
-        b.addEventListener('click', () => {
-          input.value = b.dataset.value;
-          close();
-          input.dispatchEvent(new Event('change'));
-        });
-      });
-    });
   }
 
   function bindSettings() {
@@ -828,15 +836,6 @@
       bindMountDelete(div);
     });
     bindMountDelete($('#mount-list'));
-    $('#btn-115-qr').addEventListener('click', openQrModal);
-    const logout = $('#btn-115-logout');
-    if (logout) logout.addEventListener('click', async () => {
-      if (!confirm('确定退出 115 登录？')) return;
-      await api('/api/115/logout', { method: 'POST', body: {} });
-      toast('已退出 115', 'ok');
-      loadAll(true);
-    });
-    $('#btn-115-check').addEventListener('click', () => loadAll(true).then(() => toast('状态已刷新', 'ok')));
     $('#btn-115-cookie-test').addEventListener('click', async () => {
       const out = $('#cookie-test-result');
       const cookie = ($('#cfg-115-cookie').value || '').trim();
@@ -847,8 +846,8 @@
         out.textContent = `Cookie 可用：最近文件 ${d.count || 0} 条`
           + (d.events != null ? ` · 操作事件 ${d.events} 条` : '')
           + (d.events_error ? `（事件接口：${d.events_error}）` : '')
-          + (d.sample && d.sample.name ? ` · 最新：${d.sample.name}` : '')
-          + (d.path ? ` → ${d.path}` : '');
+          + (d.link ? ' · 直链 OK' : '')
+          + (d.link_error ? `（直链：${d.link_error}）` : '');
       } catch (err) {
         out.textContent = err.message || 'Cookie 测试失败';
       }
@@ -856,6 +855,10 @@
     $('#btn-copy-hook').addEventListener('click', () => copyText($('#cfg-webhook').value));
     const copyEmby = $('#btn-copy-emby');
     if (copyEmby) copyEmby.addEventListener('click', () => copyText($('#cfg-emby-url').value));
+    const watchRun = $('#btn-watch-run');
+    if (watchRun) watchRun.addEventListener('click', () => runWatch(watchRun));
+    const watchRun2 = $('#btn-watch-run-2');
+    if (watchRun2) watchRun2.addEventListener('click', () => runWatch(watchRun2));
     const eventsRun = $('#btn-events-run');
     if (eventsRun) eventsRun.addEventListener('click', () => runEvents(eventsRun, $('#events-run-result')));
     const fullBtn = $('#btn-full-run-settings');
@@ -870,7 +873,6 @@
         toast('测试消息已发送', 'ok');
       } catch (err) { out.textContent = err.message || '发送失败'; }
     });
-    bindCombos();
     $$('[data-theme-seg] button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.mode)));
     applyTheme(themeMode(), false);
     $('#btn-change-pass').addEventListener('click', async () => {
@@ -918,7 +920,6 @@
     c.provider.type = val('cfg-provider') || c.provider.type;
     c.provider.ua_mode = val('cfg-ua-mode');
     c.provider.fixed_ua = val('cfg-fixed-ua');
-    c.provider.u115_client_id = val('cfg-115-client');
     c.provider.alist_base = val('cfg-alist-base');
     if (val('cfg-alist-token')) c.provider.alist_token = val('cfg-alist-token');
     c.provider.alist_public_base = val('cfg-alist-public');
@@ -933,13 +934,10 @@
       cd2_prefix: row.querySelector('.mount-cd2').value.trim(),
     })).filter((m) => m.plex_prefix);
 
-    c.scan.enabled = checked('cfg-scan-enabled');
-    c.scan.watch_enabled = checked('cfg-watch-enabled');
+    c.scan.enabled = true;
     c.scan.first_run_scan = checked('cfg-first-scan');
-    c.scan.interval = Number(val('cfg-interval')) || 180;
-    c.scan.settle_seconds = Number(val('cfg-settle')) || 90;
-    c.scan.max_depth = Number(val('cfg-depth')) || 4;
-    c.scan.min_size_mb = Number(val('cfg-minsize')) || 20;
+    c.scan.watch_enabled = checked('cfg-watch-enabled');
+    c.scan.interval = durValue('cfg-watch-interval', 1800);
 
     c.scan.full_enabled = checked('cfg-full-enabled');
     c.scan.full_on_start = checked('cfg-full-start');
@@ -947,13 +945,7 @@
 
     c.events.enabled = checked('cfg-events-enabled');
     c.events.first_scan = checked('cfg-events-first');
-    c.events.verify_enabled = checked('cfg-events-verify');
-    c.events.recent_fallback = checked('cfg-events-recent');
-    c.events.interval = Number(val('cfg-events-interval')) || 60;
-    c.events.settle_seconds = Number(val('cfg-events-settle')) || 120;
-    c.events.max_wait_seconds = Number(val('cfg-events-maxwait')) || 900;
-    c.events.verify_delay = Number(val('cfg-events-verify-delay')) || 300;
-    c.events.limit = Number(val('cfg-events-limit')) || 100;
+    c.events.interval = durValue('cfg-events-interval', 60);
 
     c.notify.wecom_enabled = checked('cfg-wecom-enabled');
     c.notify.wecom_corpid = val('cfg-wecom-corpid');
@@ -997,64 +989,7 @@
     }
   }
 
-  // ------------------------------------------------------------------ 115 登录
-  function openQrModal() {
-    const root = $('#modal-root');
-    root.innerHTML = `
-      <div class="modal-mask">
-        <div class="modal">
-          <div class="modal-head"><h3>扫码登录 115</h3><button class="icon-btn" data-close><svg><use href="#i-x"></use></svg></button></div>
-          <div class="modal-body">
-            <div class="qr-wrap"><img id="qr-img" alt="115 登录二维码" src=""><div class="qr-status" id="qr-status">正在获取二维码…</div></div>
-            <p style="margin-top:14px">打开手机 115 App → 右上角扫一扫。二维码约 2 分钟有效，过期点「刷新二维码」。</p>
-            <div style="display:flex;justify-content:space-between;gap:8px;margin-top:6px">
-              <button class="btn ghost sm" id="qr-refresh">刷新二维码</button>
-              <button class="btn sm" data-close>关闭</button>
-            </div>
-          </div>
-        </div>
-      </div>`;
-    root.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeModal));
-    root.querySelector('.modal-mask').addEventListener('click', (e) => { if (e.target.classList.contains('modal-mask')) closeModal(); });
-    $('#qr-refresh').addEventListener('click', loadQr);
-    loadQr();
-  }
-
-  async function loadQr() {
-    if (state.qrTimer) { clearInterval(state.qrTimer); state.qrTimer = null; }
-    $('#qr-status').textContent = '正在获取二维码…';
-    try {
-      const res = await api('/api/115/qr', { method: 'POST', body: {} });
-      $('#qr-img').src = res.data.qrcode;
-      $('#qr-status').textContent = '请用手机 115 App 扫码';
-      state.qrTimer = setInterval(pollQr, 2200);
-    } catch (err) {
-      $('#qr-status').textContent = err.message;
-    }
-  }
-
-  async function pollQr() {
-    try {
-      const res = await api('/api/115/qr/status');
-      const d = res.data;
-      if (d.status === 2) {
-        clearInterval(state.qrTimer); state.qrTimer = null;
-        $('#qr-status').textContent = '授权成功';
-        toast('115 登录成功', 'ok');
-        setTimeout(() => { closeModal(); loadAll(true); }, 600);
-      } else if (d.status === 1) {
-        $('#qr-status').textContent = '已扫码，请在手机上确认';
-      } else {
-        $('#qr-status').textContent = d.msg || '等待扫码…';
-      }
-    } catch (err) {
-      clearInterval(state.qrTimer); state.qrTimer = null;
-      $('#qr-status').textContent = err.message;
-    }
-  }
-
   function closeModal() {
-    if (state.qrTimer) { clearInterval(state.qrTimer); state.qrTimer = null; }
     $('#modal-root').innerHTML = '';
   }
 
@@ -1077,7 +1012,6 @@
 
     $$('[data-theme-toggle]').forEach((b) => b.addEventListener('click', cycleTheme));
     document.addEventListener('click', (e) => {
-      if (!e.target.closest('.combo')) $$('.combo.open').forEach((b) => b.classList.remove('open'));
     });
     if (window.matchMedia) {
       const mq = window.matchMedia('(prefers-color-scheme: dark)');

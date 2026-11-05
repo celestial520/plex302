@@ -23,6 +23,10 @@ from . import config, logger, notify, plex, resolver, scanner, store, u115events
 
 VIDEOISH_DIR_TYPES = {17, 18, 20}
 
+# 115 对高频接口调用比较敏感（风控会返回 405/403），
+# 反查目录路径是按目录缓存的，这里再给每条新事件加一点间隔。
+EVENT_DELAY = 0.6
+
 
 def _join(folder: str, name: str) -> str:
     folder = (folder or "/").rstrip("/")
@@ -206,6 +210,7 @@ class EventWatcher:
             folder = "/"
             if item["type"] in (18, 20) or (item["is_dir"] and item["type"] in (5, 6)):
                 u115web.clear_path_cache()
+                u115web.clear_file_cache()
             if item.get("parent_id"):
                 try:
                     folder = await asyncio.to_thread(u115web.folder_path, cfg, item["parent_id"])
@@ -216,6 +221,7 @@ class EventWatcher:
                     )
                     skipped += 1
                     continue
+                await asyncio.sleep(EVENT_DELAY)
             cloud_path = _join(folder, item["name"])
             plex_path = resolver.resolver.map_plex_path(cfg, cloud_path) or ""
             if not plex_path:

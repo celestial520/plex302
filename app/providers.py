@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import requests
 
-from . import cd2, config, logger, u115
+from . import cd2, config, logger, u115web
 
 
 class ProviderError(Exception):
@@ -35,12 +35,14 @@ def _ua(cfg: Dict[str, Any], ctx: ResolveContext) -> str:
 
 
 def _resolve_115(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> Link:
-    if not u115.client.is_authorized():
-        raise ProviderError("115 未授权，请到 WebUI 扫码登录")
-    url, _name = u115.client.file_url_by_path(cloud_path, _ua(cfg, ctx))
+    """115 直链：Cookie 模式（网页版接口），不再依赖开放平台。"""
+    if not u115web.has_cookie(cfg):
+        raise ProviderError("未配置 115 Cookie（设置 → 115）")
+    info = u115web.file_url_by_path(cfg, cloud_path, _ua(cfg, ctx))
+    url = info["url"]
     if cfg["provider"].get("force_https") and url.startswith("http://"):
         url = "https://" + url[len("http://"):]
-    return Link(url=url, provider="115", expires_in=7200)
+    return Link(url=url, provider="115", expires_in=1800)
 
 
 def _resolve_cd2(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> Link:

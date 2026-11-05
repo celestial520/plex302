@@ -62,15 +62,14 @@ DEFAULTS: dict[str, Any] = {
         "alist_public_base": "",
         "custom_url": "",
         "custom_token": "",
-        "u115_client_id": "100197847",
     },
     "scan": {
         "enabled": True,
-        "watch_enabled": True,
+        "watch_enabled": False,
         "watch_sections": [],
-        "interval": 180,
+        "interval": 1800,
         "settle_seconds": 90,
-        "max_depth": 4,
+        "max_depth": 3,
         "min_size_mb": 20,
         "max_entries": 200000,
         "first_run_scan": False,
@@ -105,10 +104,10 @@ DEFAULTS: dict[str, Any] = {
         "limit": 100,            # 单页条数
         "max_pages": 5,          # 一轮最多翻几页
         "first_scan": False,     # 首次运行是否补扫历史
-        "settle_seconds": 120,   # 目录静置多久再扫（CMS 整理期间不断延长）
-        "max_wait_seconds": 900, # 单目录最长等待，避免一直有事件时永远不扫
+        "settle_seconds": 90,    # 目录静置多久再扫（CMS 整理期间不断延长）
+        "max_wait_seconds": 600, # 单目录最长等待，避免一直有事件时永远不扫
         "verify_enabled": True,  # 扫完再复核一次，接住“扫的时候还没写完”
-        "verify_delay": 300,     # 复核延迟（秒）
+        "verify_delay": 180,     # 复核延迟（秒）
         "recent_fallback": True, # 同时检查“最近文件”，兜住事件接口偶发空返回
     },
     "notify": {
@@ -231,15 +230,14 @@ def normalize(cfg: dict) -> dict:
     provider["alist_public_base"] = str(provider.get("alist_public_base") or "").strip().rstrip("/")
     provider["custom_url"] = str(provider.get("custom_url") or "").strip()
     provider["custom_token"] = str(provider.get("custom_token") or "").strip()
-    provider["u115_client_id"] = str(provider.get("u115_client_id") or "100197847").strip()
 
     scan = cfg["scan"]
     scan["enabled"] = _as_bool(scan.get("enabled"), True)
-    scan["watch_enabled"] = _as_bool(scan.get("watch_enabled"), True)
+    scan["watch_enabled"] = _as_bool(scan.get("watch_enabled"), False)
     scan["first_run_scan"] = _as_bool(scan.get("first_run_scan"), False)
-    scan["interval"] = _as_int(scan.get("interval"), 180, 30, 86400)
+    scan["interval"] = _as_int(scan.get("interval"), 1800, 60, 86400)
     scan["settle_seconds"] = _as_int(scan.get("settle_seconds"), 90, 0, 86400)
-    scan["max_depth"] = _as_int(scan.get("max_depth"), 4, 1, 12)
+    scan["max_depth"] = _as_int(scan.get("max_depth"), 3, 1, 12)
     scan["min_size_mb"] = _as_int(scan.get("min_size_mb"), 20, 0, 1024 * 1024)
     scan["max_entries"] = _as_int(scan.get("max_entries"), 200000, 1000, 5000000)
     scan["full_enabled"] = _as_bool(scan.get("full_enabled"), True)
@@ -297,10 +295,10 @@ def normalize(cfg: dict) -> dict:
     events["interval"] = _as_int(events.get("interval"), 60, 15, 3600)
     events["limit"] = _as_int(events.get("limit"), 100, 20, 500)
     events["max_pages"] = _as_int(events.get("max_pages"), 5, 1, 20)
-    events["settle_seconds"] = _as_int(events.get("settle_seconds"), 120, 0, 3600)
-    events["max_wait_seconds"] = _as_int(events.get("max_wait_seconds"), 900, 60, 7200)
+    events["settle_seconds"] = _as_int(events.get("settle_seconds"), 90, 0, 3600)
+    events["max_wait_seconds"] = _as_int(events.get("max_wait_seconds"), 600, 60, 7200)
     events["verify_enabled"] = _as_bool(events.get("verify_enabled"), True)
-    events["verify_delay"] = _as_int(events.get("verify_delay"), 300, 30, 3600)
+    events["verify_delay"] = _as_int(events.get("verify_delay"), 180, 30, 3600)
     events["recent_fallback"] = _as_bool(events.get("recent_fallback"), True)
 
     notify = cfg["notify"]

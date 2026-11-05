@@ -125,6 +125,16 @@ def queue_scan(target: str, section: str = "", ok: bool = True, message: str = "
         )
 
 
+SOURCE_TEXT = {
+    "115event": "115 事件",
+    "115recent": "最近文件",
+    "verify": "延迟复核",
+    "cms": "CMS 通知",
+    "watch": "目录监听",
+    "manual": "手动",
+}
+
+
 def flush(force: bool = False) -> None:
     cfg = config.load()
     if not cfg["notify"].get("wecom_enabled"):
@@ -145,6 +155,7 @@ def flush(force: bool = False) -> None:
             name = x["target"].rstrip("/").split("/")[-1] or x["target"]
             lines.append(f"· {name}")
             lines[-1] += f"（{x['section']}）" if x["section"] else ""
+            lines[-1] += f" · {SOURCE_TEXT.get(x.get('source') or '', x.get('source') or '')}".rstrip(" ·")
         if len(ok_items) > 12:
             lines.append(f"…… 还有 {len(ok_items) - 12} 个")
     if bad_items:
@@ -153,7 +164,7 @@ def flush(force: bool = False) -> None:
         lines.append(f"失败 {len(bad_items)} 个")
         for x in bad_items[:6]:
             lines.append(f"· {x['target']}：{x['message'] or '未知错误'}")
-    title = "Plex302 · 入库完成" if not bad_items else "Plex302 · 部分扫描失败"
+    title = "Plex302 · 增量入库完成" if not bad_items else "Plex302 · 部分扫描失败"
     err = send_wecom(title, "\n".join(lines), force=force)
     if err:
         logger.warn(f"[通知] {err}")

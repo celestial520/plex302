@@ -168,6 +168,40 @@ jobs:
           curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/scan/history?limit=5' | grep -q '115event' \
             || { echo "::error::扫描记录里没有 115event 来源"; exit 1; }
 
+          echo "--- 115 Cookie 直链（302 走网页接口） ---"
+          # 切到 115 Cookie 模式：路径 -> pick_code -> /files/download -> 直链
+          curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
+          python3 - <<'PY'
+          import json
+          cfg = json.load(open("cfg.json"))["data"]
+          cfg["provider"]["type"] = "115"
+          cfg["provider"]["force_https"] = False
+          json.dump(cfg, open("cfg2.json", "w"))
+          PY
+          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            --data-binary @cfg2.json http://127.0.0.1:999/api/config -o /dev/null
+          sleep 4
+          curl -s -D headers2.txt -o /dev/null -H 'X-Forwarded-For: 8.8.8.8' \
+            'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+          grep -iE '^(HTTP/1.1 302|Location:|X-Plex302:)' headers2.txt || { echo "::error::Cookie 直链没有 302"; cat headers2.txt; exit 1; }
+          grep -qi '32402/media' headers2.txt || { echo "::error::Cookie 直链没有指向 115 下载地址"; cat headers2.txt; exit 1; }
+          echo "Cookie 直链 OK"
+
+          echo "--- 局域网也 302 ---"
+          curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
+          python3 - <<'PY'
+          import json
+          cfg = json.load(open("cfg.json"))["data"]
+          cfg["server"]["redirect_lan"] = True
+          json.dump(cfg, open("cfg2.json", "w"))
+          PY
+          curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            --data-binary @cfg2.json http://127.0.0.1:999/api/config -o /dev/null
+          sleep 4
+          curl -s -D headers3.txt -o /dev/null -H 'X-Forwarded-For: 192.168.1.9' \
+            'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+          grep -qi '^HTTP/1.1 302' headers3.txt || { echo "::error::开启局域网 302 后内网仍回源"; cat headers3.txt; exit 1; }
+
           echo "--- 全量同步：Plex 整库扫描 ---"
           full=$(curl -s -m 60 -b cookie.txt -X POST http://127.0.0.1:999/api/sync/full)
           echo "触发 $full"

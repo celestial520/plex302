@@ -3,7 +3,8 @@
 python3 tests/mock_115.py --port 32403
   GET  /behavior/detail?limit&offset   生活事件（操作流水，倒序）
   GET  /files/recent?limit=N           最近变动
-  GET  /files?cid=<cid>                目录 path 链路
+  GET  /files?cid=<cid>                列目录（含 path 链路）
+  GET  /files/download?pick_code=<pc>  取直链
   POST /add                            加一条“最近文件”
   POST /add_event                      加一条操作事件
 """
@@ -48,6 +49,17 @@ STATE = {
     "paths": {
         "2001": [{"cid": "0", "name": ""}, {"cid": "100", "name": "电影"}, {"cid": "2001", "name": "沙丘2 (2024)"}],
         "2002": [{"cid": "0", "name": ""}, {"cid": "100", "name": "电视剧"}, {"cid": "2002", "name": "测试剧"}],
+    },
+    # cid -> 子项，用来测「路径 -> pick_code -> 直链」
+    "tree": {
+        "0": [{"n": "电影", "cid": "100", "fid": ""}, {"n": "电视剧", "cid": "200", "fid": ""}],
+        "100": [{"n": "沙丘2 (2024)", "cid": "2001", "fid": ""}],
+        "200": [{"n": "测试剧", "cid": "2002", "fid": ""}],
+        "2001": [{"n": "沙丘2.mkv", "cid": "", "fid": "9001", "pc": "pcdune", "s": 8 * 1024 * 1024 * 1024}],
+        "2002": [
+            {"n": "Season 01", "cid": "2003", "fid": ""},
+            {"n": "S01E01.mkv", "cid": "", "fid": "9100", "pc": "pctv", "s": 104857600},
+        ],
     },
 }
 
@@ -122,8 +134,28 @@ class Handler(BaseHTTPRequestHandler):
                 items = list(STATE["recent"])[:limit]
             return self._json({"state": True, "data": items})
         if path == "/files":
-            cid = (query.get("cid") or ["0"])[0]
-            return self._json({"state": True, "path": STATE["paths"].get(cid, []), "data": []})
+            cid = str((query.get("cid") or ["0"])[0])
+            children = STATE["tree"].get(cid, [])
+            return self._json({
+                "state": True,
+                "count": len(children),
+                "path": STATE["paths"].get(cid, []),
+                "data": children,
+            })
+        if path == "/files/download":
+            pc = (query.get("pick_code") or query.get("pickcode") or [""])[0]
+            for items in STATE["tree"].values():
+                for item in items:
+                    if item.get("pc") == pc:
+                        return self._json({
+                            "state": True,
+                            "data": {
+                                "file_url": f"http://127.0.0.1:32402/media/{pc}.mkv",
+                                "file_name": item["n"],
+                                "file_size": item.get("s", 0),
+                            },
+                        })
+            return self._json({"state": False, "errno": 990001, "error": "提取码不存在"})
         self._json({"state": False, "error": "not found"}, 404)
 
 

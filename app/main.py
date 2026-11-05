@@ -13,11 +13,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, cd2, config, events, logger, notify, plex, resolver, scanner, scheduler, store, u115, u115events, u115web, watcher
+from . import auth, cd2, config, events, logger, notify, plex, resolver, scanner, scheduler, store, u115events, u115web, watcher
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook"}
 
@@ -174,8 +174,10 @@ async def api_status(request: Request) -> Any:
             "version": VERSION,
             "plex": plex_status,
             "cd2": cd2_status,
-            "u115": u115.client.token_status(),
+            "u115": {"cookie_set": bool(cfg["u115"].get("cookie")), "cookie_hint": ("…" + cfg["u115"]["cookie"][-6:]) if cfg["u115"].get("cookie") else ""},
             "provider": cfg["provider"]["type"],
+            "scan_watch_on": bool(cfg["scan"].get("watch_enabled")),
+            "lan_redirect": bool(cfg["server"].get("redirect_lan")),
             "mounts": len(cfg["mounts"]),
             "watch": watcher.watcher.last_summary,
             "events": {
@@ -450,43 +452,6 @@ async def api_test_link(request: Request) -> Any:
 @app.post("/api/cd2/test")
 async def api_cd2_test() -> Any:
     return _ok(await asyncio.to_thread(cd2.system_info, 5.0))
-
-
-# --------------------------------------------------------------------- 115
-@app.post("/api/115/qr")
-async def api_115_qr() -> Any:
-    try:
-        data = await asyncio.to_thread(u115.client.qr_create)
-        return _ok(data)
-    except u115.U115Error as err:
-        return _err(str(err))
-
-
-@app.get("/api/115/qr/status")
-async def api_115_qr_status() -> Any:
-    try:
-        data = await asyncio.to_thread(u115.client.qr_status)
-        return _ok(data)
-    except u115.U115Error as err:
-        return _err(str(err))
-
-
-@app.get("/api/115/user")
-async def api_115_user() -> Any:
-    if not u115.client.is_authorized():
-        return _ok({"authorized": False})
-    try:
-        info = await asyncio.to_thread(u115.client.user_info, True)
-        return _ok({"authorized": True, **info})
-    except u115.U115Error as err:
-        return _err(str(err))
-
-
-@app.post("/api/115/logout")
-async def api_115_logout() -> Any:
-    u115.client.logout()
-    logger.info("[115] 已退出登录")
-    return _ok()
 
 
 # ------------------------------------------------------- 115 网页 Cookie / 操作事件

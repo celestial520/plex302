@@ -149,6 +149,7 @@ code, .mono { font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, mono
 .pill.ok .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(52, 211, 153, .12); }
 .pill.bad .dot { background: var(--red); box-shadow: 0 0 0 4px rgba(248, 113, 113, .12); }
 .pill.warn .dot { background: var(--amber); }
+.pill.idle { color: var(--muted); }
 .pill.ok { color: var(--ok-text); border-color: rgba(52, 211, 153, .28); background: rgba(52, 211, 153, .08); }
 .pill.bad { color: var(--bad-text); border-color: rgba(248, 113, 113, .28); background: rgba(248, 113, 113, .08); }
 
@@ -264,6 +265,7 @@ td .muted { color: var(--muted-2); }
 .field.full { grid-column: 1 / -1; }
 .field label { font-size: 11.5px; color: var(--muted); letter-spacing: .2px; }
 .field .desc { font-size: 11px; color: var(--muted-2); line-height: 1.55; }
+.field > .btn { align-self: flex-start; }
 .input, select, textarea {
   width: 100%; height: 38px; padding: 0 11px;
   border-radius: 9px; border: 1px solid var(--line-strong);
@@ -312,31 +314,20 @@ input[type="time"] { cursor: pointer; }
 }
 .save-bar span { color: var(--muted-2); font-size: 11.5px; }
 
-/* ---------------- 间隔选择器（点一下就能选） ---------------- */
-.combo { position: relative; display: flex; align-items: center; }
-.combo .input { padding-right: 34px; }
-.combo-arrow {
-  position: absolute; right: 4px; top: 4px; width: 30px; height: 30px;
-  display: grid; place-items: center; border: 0; border-radius: 7px;
-  background: transparent; color: var(--muted);
+/* ---------------- 时间设置：数字 + 单位 ---------------- */
+.dur { display: flex; align-items: center; gap: 8px; }
+.dur .input { flex: 1 1 auto; min-width: 0; }
+.dur select {
+  flex: 0 0 84px; height: 38px; padding: 0 8px; border-radius: 9px;
+  border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--text);
+  font-size: 12.5px;
 }
-.combo-arrow svg { width: 14px; height: 14px; transition: transform .16s; }
-.combo.open .combo-arrow svg { transform: rotate(180deg); }
-.combo-menu {
-  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 30;
-  display: none; padding: 6px; border-radius: 12px;
-  border: 1px solid var(--line-strong); background: var(--modal-bg);
-  box-shadow: var(--shadow);
-}
-.combo.open .combo-menu { display: block; }
-.combo-menu button {
-  display: flex; align-items: center; justify-content: space-between;
-  width: 100%; padding: 8px 10px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--text); font-size: 12.5px; text-align: left;
-}
-.combo-menu button:hover { background: var(--accent-soft); }
-.combo-menu button.on { color: var(--accent); }
-.combo-menu button small { color: var(--muted-2); font-size: 10.5px; }
+
+/* 目录监听概况 */
+.watch-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.watch-facts div { padding: 10px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.watch-facts span { display: block; font-size: 11px; color: var(--muted-2); margin-bottom: 4px; }
+.watch-facts b { font-size: 14px; font-weight: 600; }
 
 /* ---------------- 外观 ---------------- */
 .seg { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
@@ -383,9 +374,6 @@ input[type="time"] { cursor: pointer; }
 .modal-head h3 { margin: 0; font-size: 14px; }
 .modal-body { padding: 18px; }
 .modal-body p { color: var(--muted); font-size: 12.5px; line-height: 1.7; margin: 0 0 12px; }
-.qr-wrap { display: grid; place-items: center; gap: 12px; padding: 8px 0 4px; }
-.qr-wrap img { width: 220px; height: 220px; border-radius: 14px; background: #fff; padding: 8px; }
-.qr-status { color: var(--muted); font-size: 12px; text-align: center; min-height: 18px; }
 
 /* ---------------- toast ---------------- */
 #toast-root { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 80; }
@@ -481,4 +469,6 @@ input[type="time"] { cursor: pointer; }
   table.responsive td .path { text-align: right; }
   .modal-mask { align-items: end; padding: 0; }
   .modal { width: 100%; border-radius: 20px 20px 0 0; }
+  .watch-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dur select { flex-basis: 78px; }
 }
