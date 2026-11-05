@@ -36,7 +36,6 @@ jobs:
           set -e
           mkdir -p "${PWD}/smoke-config"
           docker run -d --name p302 \
-            --add-host host.docker.internal:host-gateway \
             -e TZ=Asia/Shanghai \
             -e NGINX_PORT=32500 \
             -e WEBUI_PORT=999 \
@@ -77,6 +76,10 @@ jobs:
       - name: 端到端 302（假 Plex + 假直链）
         run: |
           set -e
+          # 用 docker0 网关 IP 而不是 host.docker.internal：
+          # nginx 的 proxy_pass 走自己配的 resolver，不读 /etc/hosts
+          GW=$(ip route | awk '/^default/ {print $3; exit}')
+          echo "宿主机网关=$GW"
           python3 tests/mock_plex.py --host 0.0.0.0 --port 32401 --cdn-port 32402 &
           sleep 2
 
@@ -85,13 +88,13 @@ jobs:
             -d '{"password":"admin"}' http://127.0.0.1:999/api/login
           curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
 
-          python3 - <<'PY'
-          import json
+          GW="$GW" python3 - <<'PY'
+          import json, os
           cfg = json.load(open("cfg.json"))["data"]
-          cfg["plex"]["url"] = "http://host.docker.internal:32401"
+          cfg["plex"]["url"] = f"http://{os.environ['GW']}:32401"
           cfg["plex"]["token"] = "mock"
           cfg["provider"]["type"] = "custom"
-          cfg["provider"]["custom_url"] = "http://host.docker.internal:32402/link"
+          cfg["provider"]["custom_url"] = f"http://{os.environ['GW']}:32402/link"
           json.dump(cfg, open("cfg2.json", "w"))
           PY
 
