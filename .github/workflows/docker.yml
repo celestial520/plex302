@@ -134,7 +134,7 @@ jobs:
 
           # 第一轮：只记录，不扫描
           first=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:9999/api/115/recent/run)
+            http://127.0.0.1:999/api/115/recent/run)
           echo "第一轮 $first"
 
           curl -s -m 5 -X POST -H 'Content-Type: application/json' \
@@ -143,12 +143,12 @@ jobs:
 
           # 第二轮：应该入队扫描
           second=$(curl -s -m 20 -b cookie.txt -X POST -H 'Content-Type: application/json' -d '{}' \
-            http://127.0.0.1:9999/api/115/recent/run)
+            http://127.0.0.1:999/api/115/recent/run)
           echo "第二轮 $second"
           echo "$second" | grep -q '"queued":1' || { echo "::error::115 最近文件没有入队扫描"; exit 1; }
 
           sleep 3
-          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:9999/api/scan/history?limit=5' | grep -q '115recent' \
+          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/scan/history?limit=5' | grep -q '115recent' \
             || { echo "::error::扫描记录里没有 115recent 来源"; exit 1; }
 
       - name: 输出日志
