@@ -497,7 +497,7 @@ Plex302 · 增量入库完成
 | `events.enabled` | `true` | 115 操作事件监听 |
 | `events.interval` | `60` | 检查间隔（秒，界面上按分钟/小时填） |
 | `events.first_scan` | `false` | 首次运行是否补扫历史 |
-| `events.settle_seconds` | `90` | 目录静置（内置，界面不暴露） |
+| `events.settle_seconds` | `90` | 目录静置（内置，界面不暴露；每来一个新事件顺延） |
 | `events.max_wait_seconds` | `600` | 单目录最长等待 |
 | `events.verify_delay` | `180` | 扫完复核延迟 |
 | `events.limit` / `max_pages` | `100` / `5` | 每页条数 / 最多翻页 |
