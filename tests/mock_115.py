@@ -52,7 +52,12 @@ STATE = {
     },
     # cid -> 子项，用来测「路径 -> pick_code -> 直链」
     "tree": {
-        "0": [{"n": "电影", "cid": "100", "fid": ""}, {"n": "电视剧", "cid": "200", "fid": ""}],
+        "0": [
+            {"n": "电影", "cid": "100", "fid": ""},
+            {"n": "电视剧", "cid": "200", "fid": ""},
+            {"n": "待整理", "cid": "300", "fid": ""},
+            {"n": "媒体", "cid": "400", "fid": ""},
+        ],
         "100": [{"n": "沙丘2 (2024)", "cid": "2001", "fid": ""}],
         "200": [{"n": "测试剧", "cid": "2002", "fid": ""}],
         "2001": [{"n": "沙丘2.mkv", "cid": "", "fid": "9001", "pc": "pcdune", "s": 8 * 1024 * 1024 * 1024}],
@@ -60,8 +65,37 @@ STATE = {
             {"n": "Season 01", "cid": "2003", "fid": ""},
             {"n": "S01E01.mkv", "cid": "", "fid": "9100", "pc": "pctv", "s": 104857600},
         ],
+        "300": [
+            {"n": "沙丘2.Dune.Part.Two.2024.2160p.WEB-DL.mkv", "cid": "", "fid": "9200", "pc": "pcorg", "s": 9 * 1024 * 1024 * 1024},
+            {"n": "三体.S01E05.2023.1080p.mkv", "cid": "", "fid": "9201", "pc": "pcorg2", "s": 2 * 1024 * 1024 * 1024},
+        ],
+        "400": [],
     },
+    "next_cid": 5000,
+    "share": {
+        "code": "swtest",
+        "password": "abcd",
+        "items": [{"fid": "7001", "n": "分享的电影.mkv", "s": 4 * 1024 * 1024 * 1024, "is_dir": False}],
+    },
+    "offline": [],
+    "renames": [],
+    "moves": [],
 }
+
+
+def _find_path(cid: str):
+    """cid -> [{"cid":..., "name":...}]，和真实 115 的 path 字段一致。"""
+    target = str(cid)
+    stack = [("0", [])]
+    while stack:
+        cur, trail = stack.pop()
+        if cur == target:
+            return [{"cid": "0", "name": ""}] + trail
+        for item in STATE["tree"].get(cur, []):
+            sub = str(item.get("cid") or "")
+            if sub:
+                stack.append((sub, trail + [{"cid": sub, "name": item["n"]}]))
+    return [{"cid": "0", "name": ""}]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,8 +124,25 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
+    def _read_form(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        return {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "ignore")).items()}
+
+    def _body(self):
+        ctype = self.headers.get("Content-Type", "")
+        return self._read_json() if "json" in ctype else self._read_form()
+
     def do_POST(self):  # noqa: N802
         path = urlparse(self.path).path
+        if not self._authorized():
+            body = b"<html>405</html>"
+            self.send_response(405)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/add":
             item = self._read_json()
             with LOCK:
@@ -106,6 +157,74 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["events"].append(item)
             return self._json({"state": True, "count": len(STATE["events"])})
+        if path == "/files/add":
+            form = self._read_form()
+            pid, name = form.get("pid", "0"), form.get("cname", "")
+            if not name:
+                return self._json({"state": False, "error": "目录名不能为空"})
+            with LOCK:
+                cid = str(STATE["next_cid"])
+                STATE["next_cid"] += 1
+                STATE["tree"].setdefault(pid, []).append({"n": name, "cid": cid, "fid": ""})
+                STATE["tree"].setdefault(cid, [])
+            return self._json({"state": True, "cid": cid, "cname": name})
+        if path == "/files/move":
+            form = self._read_form()
+            fid, pid = str(form.get("fid", "")), str(form.get("pid", "0"))
+            with LOCK:
+                moved = None
+                for items in STATE["tree"].values():
+                    for item in list(items):
+                        if str(item.get("fid")) == fid:
+                            items.remove(item)
+                            moved = item
+                if moved is None:
+                    return self._json({"state": False, "error": "文件不存在"})
+                STATE["tree"].setdefault(pid, []).append(moved)
+                STATE["moves"].append((fid, pid))
+            return self._json({"state": True})
+        if path == "/files/edit":
+            form = self._read_form()
+            fid, name = str(form.get("fid", "")), form.get("file_name", "")
+            with LOCK:
+                for items in STATE["tree"].values():
+                    for item in items:
+                        if str(item.get("fid")) == fid:
+                            item["n"] = name
+                            STATE["renames"].append((fid, name))
+                            return self._json({"state": True})
+            return self._json({"state": False, "error": "文件不存在"})
+        if path == "/files/delete":
+            form = self._read_form()
+            fid = str(form.get("fid", ""))
+            with LOCK:
+                for items in STATE["tree"].values():
+                    for item in list(items):
+                        if str(item.get("fid")) == fid:
+                            items.remove(item)
+                            return self._json({"state": True})
+            return self._json({"state": False, "error": "文件不存在"})
+        if path == "/share/receive":
+            form = self._read_form()
+            share = STATE["share"]
+            if form.get("share_code") != share["code"]:
+                return self._json({"state": False, "error": "分享不存在"})
+            if share["password"] and form.get("receive_code") != share["password"]:
+                return self._json({"state": False, "error": "提取码错误"})
+            ids = [x for x in str(form.get("file_id", "")).split(",") if x]
+            cid = str(form.get("cid") or "0")
+            with LOCK:
+                for item in share["items"]:
+                    if str(item["fid"]) in ids:
+                        STATE["tree"].setdefault(cid, []).append(
+                            {"n": item["n"], "cid": "", "fid": item["fid"], "pc": "pcshare", "s": item["s"]}
+                        )
+            return self._json({"state": True})
+        if path == "/offline/add_task_urls":
+            form = self._read_form()
+            with LOCK:
+                STATE["offline"].append({"url": form.get("urls"), "cid": form.get("wp_path_id")})
+            return self._json({"state": True, "data": {"info_hash": "hash123"}})
         self._json({"state": False, "error": "not found"}, 404)
 
     def do_GET(self):  # noqa: N802
@@ -139,9 +258,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({
                 "state": True,
                 "count": len(children),
-                "path": STATE["paths"].get(cid, []),
+                "path": _find_path(cid),
                 "data": children,
             })
+        if path == "/share/snap":
+            code = (query.get("share_code") or [""])[0]
+            pwd = (query.get("receive_code") or [""])[0]
+            share = STATE["share"]
+            if code != share["code"]:
+                return self._json({"state": False, "error": "分享不存在"})
+            if share["password"] and pwd != share["password"]:
+                return self._json({"state": False, "error": "提取码错误"})
+            rows = [
+                {"fid": x["fid"], "cid": "0", "n": x["n"], "s": x["s"], "category": "1"}
+                for x in share["items"]
+            ]
+            return self._json({"state": True, "data": {"list": rows, "count": len(rows)}})
         if path == "/files/download":
             pc = (query.get("pick_code") or query.get("pickcode") or [""])[0]
             for items in STATE["tree"].values():

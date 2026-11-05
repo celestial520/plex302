@@ -121,6 +121,44 @@ DEFAULTS: dict[str, Any] = {
         "on_full": True,
         "on_error": True,
     },
+    # 元数据：TMDB 是识别主力；国内直连不通时用 tmdb_base 换镜像或走代理
+    "metadata": {
+        "tmdb_key": "",
+        "tmdb_base": "https://api.themoviedb.org/3",
+        "tmdb_lang": "zh-CN",
+        "proxy": "",
+    },
+    # AI 兜底识别（OpenAI 兼容，默认 DeepSeek）
+    "ai": {
+        "enabled": False,
+        "base": "https://api.deepseek.com/v1",
+        "key": "",
+        "model": "deepseek-chat",
+        "timeout": 30,
+    },
+    # 自建整理：只动 115 上的真实文件，不生成 STRM
+    "organize": {
+        "enabled": False,
+        "dry_run": True,
+        "source_dirs": [],
+        "movie_dir": "",
+        "tv_dir": "",
+        "movie_template": "{title} ({year})/{title} ({year})",
+        "tv_template": "{title} ({year})/Season {season:02d}/{title} ({year}) - S{season:02d}E{episode:02d}",
+        "min_size_mb": 100,
+        "depth": 2,
+        "overwrite": False,
+        "delay": 0.8,
+        "scan_after": True,
+    },
+    # 链接入料：把 115 分享 / 磁力 / ed2k 存到待整理目录
+    "ingest": {
+        "enabled": False,
+        "target_dir": "",
+        "wecom_token": "",
+        "wecom_aes_key": "",
+        "allow_users": "",
+    },
     "advanced": {
         "force_direct_play": True,
         "part_cache_ttl": 86400,
@@ -312,6 +350,55 @@ def normalize(cfg: dict) -> dict:
     notify["on_full"] = _as_bool(notify.get("on_full"), True)
     notify["on_error"] = _as_bool(notify.get("on_error"), True)
 
+    meta = cfg["metadata"]
+    meta["tmdb_key"] = str(meta.get("tmdb_key") or "").strip()
+    meta["tmdb_base"] = str(meta.get("tmdb_base") or "https://api.themoviedb.org/3").strip().rstrip("/")
+    meta["tmdb_lang"] = str(meta.get("tmdb_lang") or "zh-CN").strip() or "zh-CN"
+    proxy = str(meta.get("proxy") or "").strip()
+    if proxy and "://" not in proxy:
+        proxy = "http://" + proxy
+    meta["proxy"] = proxy
+
+    ai_cfg = cfg["ai"]
+    ai_cfg["enabled"] = _as_bool(ai_cfg.get("enabled"), False)
+    ai_cfg["base"] = str(ai_cfg.get("base") or "https://api.deepseek.com/v1").strip().rstrip("/")
+    ai_cfg["key"] = str(ai_cfg.get("key") or "").strip()
+    ai_cfg["model"] = str(ai_cfg.get("model") or "deepseek-chat").strip() or "deepseek-chat"
+    ai_cfg["timeout"] = _as_int(ai_cfg.get("timeout"), 30, 5, 120)
+
+    org = cfg["organize"]
+    org["enabled"] = _as_bool(org.get("enabled"), False)
+    org["dry_run"] = _as_bool(org.get("dry_run"), True)
+    org["overwrite"] = _as_bool(org.get("overwrite"), False)
+    org["scan_after"] = _as_bool(org.get("scan_after"), True)
+    dirs = org.get("source_dirs")
+    if isinstance(dirs, str):
+        dirs = [x.strip() for x in dirs.replace("\n", ",").split(",") if x.strip()]
+    org["source_dirs"] = [_norm_prefix(x) for x in (dirs or []) if _norm_prefix(x)]
+    org["movie_dir"] = _norm_prefix(org.get("movie_dir"))
+    org["tv_dir"] = _norm_prefix(org.get("tv_dir"))
+    org["movie_template"] = str(org.get("movie_template") or "{title} ({year})/{title} ({year})")
+    org["tv_template"] = str(
+        org.get("tv_template")
+        or "{title} ({year})/Season {season:02d}/{title} ({year}) - S{season:02d}E{episode:02d}"
+    )
+    org["min_size_mb"] = _as_int(org.get("min_size_mb"), 100, 0, 1024 * 1024)
+    org["depth"] = _as_int(org.get("depth"), 2, 0, 6)
+    try:
+        org["delay"] = max(0.0, min(10.0, float(org.get("delay"))))
+    except (TypeError, ValueError):
+        org["delay"] = 0.8
+
+    ingest = cfg["ingest"]
+    ingest["enabled"] = _as_bool(ingest.get("enabled"), False)
+    ingest["target_dir"] = _norm_prefix(ingest.get("target_dir"))
+    ingest["wecom_token"] = str(ingest.get("wecom_token") or "").strip()
+    ingest["wecom_aes_key"] = str(ingest.get("wecom_aes_key") or "").strip()
+    users = ingest.get("allow_users")
+    if isinstance(users, list):
+        users = ",".join(str(x) for x in users)
+    ingest["allow_users"] = str(users or "").strip()
+
     adv = cfg["advanced"]
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
     adv["part_cache_ttl"] = _as_int(adv.get("part_cache_ttl"), 86400, 60, 30 * 86400)
@@ -402,6 +489,12 @@ def masked(cfg: dict) -> dict:
     out["security"].pop("password_hash", None)
     out["notify"]["wecom_secret_set"] = bool(out["notify"].get("wecom_secret"))
     out["notify"]["wecom_secret"] = ""
+    out["metadata"]["tmdb_key_set"] = bool(out["metadata"].get("tmdb_key"))
+    out["metadata"]["tmdb_key"] = ""
+    out["ai"]["key_set"] = bool(out["ai"].get("key"))
+    out["ai"]["key"] = ""
+    out["ingest"]["wecom_aes_key_set"] = bool(out["ingest"].get("wecom_aes_key"))
+    out["ingest"]["wecom_aes_key"] = ""
     out["security"].pop("secret", None)
     return out
 
@@ -438,4 +531,16 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
     notify.pop("wecom_secret_set", None)
     if not notify.get("wecom_secret"):
         notify["wecom_secret"] = old_cfg.get("notify", {}).get("wecom_secret", "")
+    meta = new_cfg.setdefault("metadata", {})
+    meta.pop("tmdb_key_set", None)
+    if not meta.get("tmdb_key"):
+        meta["tmdb_key"] = old_cfg.get("metadata", {}).get("tmdb_key", "")
+    ai_cfg = new_cfg.setdefault("ai", {})
+    ai_cfg.pop("key_set", None)
+    if not ai_cfg.get("key"):
+        ai_cfg["key"] = old_cfg.get("ai", {}).get("key", "")
+    ingest = new_cfg.setdefault("ingest", {})
+    ingest.pop("wecom_aes_key_set", None)
+    if not ingest.get("wecom_aes_key"):
+        ingest["wecom_aes_key"] = old_cfg.get("ingest", {}).get("wecom_aes_key", "")
     return new_cfg
