@@ -8,13 +8,34 @@ let rt = {
     trust_proxy: true,
     force_direct_play: true
 };
-try {
-    rt = JSON.parse(fs.readFileSync('/config/runtime.json', 'utf8'));
-} catch (e) {
-    // 首次启动配置文件还没生成时用默认值，nginx 仍然可以起来
+let rtMtime = 0;
+let rtChecked = 0;
+
+// runtime.json 由 Python 侧写入（保存配置时），这里按 mtime 热加载，
+// 免得 nginx 比 app 先起来时一直用默认值（默认值里没有 Plex 地址）。
+function reloadRuntime() {
+    const now = Date.now();
+    if (now - rtChecked < 2000) {
+        return;
+    }
+    rtChecked = now;
+    try {
+        const st = fs.statSync('/config/runtime.json');
+        const mtime = st.mtime ? st.mtime.getTime() : 0;
+        if (mtime && mtime === rtMtime) {
+            return;
+        }
+        rt = JSON.parse(fs.readFileSync('/config/runtime.json', 'utf8'));
+        rtMtime = mtime;
+    } catch (e) {
+        // 文件还没生成：保持当前值（首次启动就是默认值）
+    }
 }
 
+reloadRuntime();
+
 function getPlex(r) {
+    reloadRuntime();
     return rt.plex;
 }
 
@@ -62,6 +83,7 @@ async function askResolver(r, body) {
 }
 
 async function redirect2Pan(r) {
+    reloadRuntime();
     const args = plainArgs(r);
     const token = (args['X-Plex-Token'] && args['X-Plex-Token'][0]) || r.headersIn['X-Plex-Token'] || '';
     let decision = null;
@@ -99,6 +121,7 @@ function proxyToPlex(r) {
 
 // Plex 在真正起播前会请求 decision；这里强制 directPlay，避免服务端转码把 302 链路绕开。
 async function decision(r) {
+    reloadRuntime();
     let args = r.variables.args || '';
     if (rt.force_direct_play) {
         args = args

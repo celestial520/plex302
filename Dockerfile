@@ -29,7 +29,8 @@ WORKDIR /app
 COPY requirements.txt /tmp/requirements.txt
 RUN /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY app /app
+# 注意：必须保留包目录层级，代码里是 `from app.xxx import`、`python -m uvicorn app.main:app`
+COPY app /app/app
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY nginx/plex302.conf.template /etc/nginx/templates/plex302.conf.template
 COPY nginx/plex302.js /etc/nginx/conf.d/plex302.js
