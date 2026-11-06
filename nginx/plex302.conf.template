@@ -1,6 +1,10 @@
 js_path /etc/nginx/conf.d/;
 js_import p302 from plex302.js;
 
+# 共享内存直链缓存（对齐 plex-demo 的 routeL1/L2Dict）：worker 之间共享，
+# reload 不丢。命中即 302，连 Python 后端都不问。直链真实过期时间写在 value 里。
+js_shared_dict_zone zone=routeDict:16M timeout=6h evict;
+
 # Plex 地址由 runtime.json 提供；改配置后 WebUI 会 nginx -s reload
 js_set $plex p302.getPlex;
 
@@ -12,6 +16,8 @@ server {
     resolver 223.5.5.5 119.29.29.29 valid=300s ipv6=off;
     js_fetch_verify off;
     js_fetch_timeout 20s;
+
+    client_max_body_size 0;
 
     proxy_http_version 1.1;
     proxy_set_header Host $host;
@@ -42,19 +48,34 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # 真正的播放请求：问 resolver，能 302 就 302，不能就回源
-    location ~* ^/library/parts/\d+/ {
-        js_content p302.redirect2Pan;
+    # 浏览 / 元数据类请求：拦截点对齐 plex-demo，但原生透传、零改写。
+    # plex-demo 在这里改 XML 是给 STRM 补流信息；CD2 是真实文件，Plex 已扫到
+    # 真实码率编码，改写反而污染。proxy_buffering off + Accept-Encoding 清空，
+    # 保证 njs 不需要碰响应体，POST /playQueues 的 body 也原样转发。
+    location ~* ^/(hubs|library|status)/(sections/\d+($|/all)|metadata/\d+($|/children)|continueWatching|promoted$|sessions$) {
+        proxy_set_header Accept-Encoding "";
+        proxy_pass $plex;
+    }
+    location ~* /playQueues {
+        proxy_set_header Accept-Encoding "";
+        proxy_pass $plex;
     }
 
+    # 起播决策：强制 directPlay，避免服务端转码绕开 302
+    location ~* ^/video/:/transcode/universal/decision {
+        proxy_set_header Accept-Encoding "";
+        js_content p302.decision;
+    }
+
+    # 真正的播放请求：命中共享内存就 302，否则问后端，失败回源
+    location ~* ^/library/parts/\d+/\d+/ {
+        set $apiType "PartStreamPlayOrDownload";
+        js_content p302.redirect2Pan;
+    }
     # 部分客户端走 universal start；directPlay=1 时同样 302
     location ~* ^/video/:/transcode/universal/start {
+        set $apiType "VideoTranscodePlay";
         js_content p302.redirect2Pan;
-    }
-
-    # 起播决策：强制 directPlay，避免服务端转码
-    location ~* ^/video/:/transcode/universal/decision {
-        js_content p302.decision;
     }
 
     # 转码分片必须回源，不能 302
@@ -62,7 +83,7 @@ server {
         proxy_pass $plex;
     }
 
-    # 字幕等小文件回源
+    # 字幕等小文件回源（plex-demo 会清掉 Range，避免上游报错）
     location ~* ^/library/streams/\d+$ {
         proxy_pass $plex;
         proxy_set_header Range "";

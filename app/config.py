@@ -133,6 +133,7 @@ DEFAULTS: dict[str, Any] = {
         "force_direct_play": True,
         "part_cache_ttl": 86400,
         "url_cache_ttl": 21600,
+        "route_cache": True,   # nginx 共享内存直链缓存（对齐 plex-demo 的 routeDict）
         "log_redirects": True,
     },
 }
@@ -334,6 +335,7 @@ def normalize(cfg: dict) -> dict:
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
     adv["part_cache_ttl"] = _as_int(adv.get("part_cache_ttl"), 86400, 60, 30 * 86400)
     adv["url_cache_ttl"] = _as_int(adv.get("url_cache_ttl"), 21600, 300, 86400)
+    adv["route_cache"] = _as_bool(adv.get("route_cache"), True)
     adv["log_redirects"] = _as_bool(adv.get("log_redirects"), True)
 
     # 未知字段直接丢弃，避免前端误传导致配置文件越来越大
@@ -395,6 +397,7 @@ def write_runtime(cfg: dict | None = None) -> None:
         "token": cfg["security"]["secret"][:48],
         "trust_proxy": cfg["server"]["trust_forwarded_for"],
         "force_direct_play": cfg["advanced"]["force_direct_play"],
+        "route_cache": cfg["advanced"]["route_cache"],
     }
     ensure_dirs()
     tmp = RUNTIME_FILE.with_suffix(".tmp")

@@ -1,4 +1,17 @@
-// Plex302 njs 入口：只做两件事——问本地 resolver 要 302，或者回源 Plex。
+// Plex302 njs 入口：拦截 / 播放架构对齐 plex-demo（bpking/embyExternalUrl）。
+//
+// 抄 plex-demo 的部分：
+//   - 拦截点拓扑：metadata/sections/playQueues/decision/parts/start/session/streams
+//   - 302 直链缓存在 nginx 共享内存（worker 间共享、reload 不丢），命中直接 302
+//     连后端都不问 —— 对应它的 routeL1/L2Dict
+//   - 强制 directPlay，避免服务端转码绕开 302
+//   - 任何失败一律回源 Plex（fallbackUseOriginal），绝不把 500 甩给播放器
+// 按 CD2 场景调整（不照抄）的部分：
+//   - metadata 响应原生透传，不注入假 Stream / container：那是给 STRM 补流信息用的，
+//     CD2 是真实文件，Plex 已扫到真实码率/编码，注入反而污染
+//   - 不需要 partInfoDict 预存 part.key -> file：STRM 的 part_file 拿不到真实路径才需要，
+//     CD2 真实文件由 Python 侧 part_cache 覆盖
+//   - 直链用 115 网页 Cookie（后端 Python 换取），不是 115 开放平台
 import fs from 'fs';
 
 let rt = {
@@ -6,29 +19,32 @@ let rt = {
     resolver: 'http://127.0.0.1:999',
     token: '',
     trust_proxy: true,
-    force_direct_play: true
+    force_direct_play: true,
+    route_cache: true,
 };
 let rtMtime = 0;
 let rtChecked = 0;
 
-// runtime.json 由 Python 侧写入（保存配置时），这里按 mtime 热加载，
-// 免得 nginx 比 app 先起来时一直用默认值（默认值里没有 Plex 地址）。
+// runtime.json 由 Python 侧写入，按 mtime 热加载，避免 nginx 比 app 先起来时用默认值。
 function reloadRuntime() {
     const now = Date.now();
-    if (now - rtChecked < 2000) {
-        return;
-    }
+    if (now - rtChecked < 2000) return;
     rtChecked = now;
     try {
         const st = fs.statSync('/config/runtime.json');
         const mtime = st.mtime ? st.mtime.getTime() : 0;
-        if (mtime && mtime === rtMtime) {
-            return;
-        }
-        rt = JSON.parse(fs.readFileSync('/config/runtime.json', 'utf8'));
+        if (mtime && mtime === rtMtime) return;
+        const cfg = JSON.parse(fs.readFileSync('/config/runtime.json', 'utf8'));
+        // 显式合并：不依赖 Object.assign（各 njs 版本支持度不一），缺字段保留默认值
+        if (cfg.plex !== undefined) rt.plex = cfg.plex;
+        if (cfg.resolver !== undefined) rt.resolver = cfg.resolver;
+        if (cfg.token !== undefined) rt.token = cfg.token;
+        if (cfg.trust_proxy !== undefined) rt.trust_proxy = cfg.trust_proxy;
+        if (cfg.force_direct_play !== undefined) rt.force_direct_play = cfg.force_direct_play;
+        if (cfg.route_cache !== undefined) rt.route_cache = cfg.route_cache;
         rtMtime = mtime;
     } catch (e) {
-        // 文件还没生成：保持当前值（首次启动就是默认值）
+        // 文件还没生成：保持当前值
     }
 }
 
@@ -60,12 +76,64 @@ function plainArgs(r) {
             const value = args[key];
             out[key] = Array.isArray(value) ? value : [String(value)];
         }
-    } catch (e) {
-        // ignore
-    }
+    } catch (e) { /* ignore */ }
     return out;
 }
 
+// ------------------------------------------------------------ 共享内存缓存
+// routeDict：请求 key -> "<过期时间戳ms>|<直链>"。njs 0.8.2 不支持 per-key
+//            timeout（要 0.8.5+），把直链真实过期时间编进 value 自己判断，
+//            保证不会把过期直链甩给播放器。
+const ROUTE_ZONE = 'routeDict';
+
+function zone(name) {
+    try { return ngx.shared[name]; } catch (e) { return null; }
+}
+
+// 缓存键包含：配置版本(rtMtime) + 客户端IP + UA + 播放参数 + directPlay。
+//   - UA：115 直链和 UA 绑定，不同设备不能串用（否则 403）
+//   - IP：内网/外网是否 302 由 Python 决策，隔开避免绕过 redirect_lan
+//   - rtMtime：runtime.json 一改（保存配置）旧缓存整体失效
+//   - directPlay：转码请求不能命中直连的缓存
+function routeKey(r, ua) {
+    const a = r.args || {};
+    const g = function (n) {
+        const v = a[n];
+        if (Array.isArray(v)) return v.length ? String(v[0]) : '';
+        return v === undefined ? '' : String(v);
+    };
+    return String(rtMtime) + '|' + clientIp(r) + '|' + ua + '|' + r.uri
+        + '|' + g('path') + '|' + g('mediaIndex') + '|' + g('partIndex')
+        + '|' + g('directPlay');
+}
+
+function routeGet(key) {
+    if (!rt.route_cache) return '';
+    const z = zone(ROUTE_ZONE);
+    if (!z) return '';
+    try {
+        const raw = z.get(key);
+        if (!raw) return '';
+        const i = raw.indexOf('|');
+        if (i < 0) return '';
+        const exp = Number(raw.slice(0, i));
+        // 直链过期就当未命中，重新解析
+        if (!exp || Date.now() > exp) return '';
+        return raw.slice(i + 1);
+    } catch (e) { return ''; }
+}
+
+function routeSet(key, url, ttlSec) {
+    if (!rt.route_cache || !url) return;
+    const z = zone(ROUTE_ZONE);
+    if (!z) return;
+    try {
+        const ttl = Math.max(30, Math.min(Number(ttlSec) || 900, 21600));
+        z.set(key, String(Date.now() + ttl * 1000) + '|' + url);
+    } catch (e) { /* 满了就跳过 */ }
+}
+
+// ------------------------------------------------------------ 工具
 async function askResolver(r, body) {
     const res = await ngx.fetch(rt.resolver + '/api/resolve', {
         method: 'POST',
@@ -76,23 +144,59 @@ async function askResolver(r, body) {
         body: JSON.stringify(body),
         max_response_body_size: 65536
     });
-    if (!res.ok) {
-        return null;
-    }
+    if (!res.ok) return null;
     return await res.json();
 }
 
+function proxyToPlex(r) {
+    // 418 交给 nginx 的 error_page -> @plex_proxy，用 $request_uri 回源，编码不丢。
+    r.return(418);
+}
+
+function copyHeaders(from, to) {
+    for (const key in from) {
+        const lower = key.toLowerCase();
+        if (lower === 'content-length' || lower === 'transfer-encoding' ||
+            lower === 'connection' || lower === 'content-encoding') continue;
+        to[key] = from[key];
+    }
+}
+
+// ------------------------------------------------------------ 播放：302
 async function redirect2Pan(r) {
     reloadRuntime();
     const args = plainArgs(r);
+    const ua = r.headersIn['User-Agent'] || '';
     const token = (args['X-Plex-Token'] && args['X-Plex-Token'][0]) || r.headersIn['X-Plex-Token'] || '';
+    const isStart = r.uri.toLowerCase().indexOf('/transcode/universal/start') >= 0;
+
+    // 客户端明确要转码：回源，不要 302（对齐 plex-demo 的 transcode 判断）
+    if (isStart && String(args['directPlay'] ? args['directPlay'][0] : '') === '0') {
+        r.headersOut['X-Plex302'] = 'proxy';
+        r.headersOut['X-Plex302-Reason'] = 'client requested transcode';
+        proxyToPlex(r);
+        return;
+    }
+
+    const key = routeKey(r, ua);
+
+    // 1) 命中 nginx 共享内存：直接 302，连 Python 后端都不问（plex-demo 的 L1/L2）
+    const hit = routeGet(key);
+    if (hit) {
+        r.headersOut['X-Plex302'] = 'redirect';
+        r.headersOut['X-Plex302-Reason'] = 'nginx-cache';
+        r.return(302, hit);
+        return;
+    }
+
+    // 2) 问 Python 后端要 115 Cookie 直链（路径映射 / 播放索引 / 节流都在后端）
     let decision = null;
     try {
         decision = await askResolver(r, {
             uri: r.uri,
             args: args,
             ip: clientIp(r),
-            ua: r.headersIn['User-Agent'] || '',
+            ua: ua,
             token: token
         });
     } catch (e) {
@@ -100,26 +204,26 @@ async function redirect2Pan(r) {
     }
 
     if (decision && decision.action === 'redirect' && decision.url) {
+        const ttl = Number(decision.cache_ttl) || 900;
+        routeSet(key, decision.url, ttl);
         r.headersOut['X-Plex302'] = 'redirect';
         r.headersOut['X-Plex302-Reason'] = decision.reason || 'ok';
+        // 客户端缓存时间不超过直链剩余寿命，避免拿着过期直链拖动进度条
+        const clientMax = Math.min(3600, Math.max(0, ttl - 300));
+        if (clientMax > 0) r.headersOut['Cache-Control'] = 'max-age=' + clientMax;
         r.return(302, decision.url);
         return;
     }
 
+    // 3) fallbackUseOriginal：任何失败一律回源 Plex，绝不把 500 甩给播放器
     r.headersOut['X-Plex302'] = 'proxy';
-    if (decision && decision.reason) {
-        r.headersOut['X-Plex302-Reason'] = decision.reason;
-    }
+    if (decision && decision.reason) r.headersOut['X-Plex302-Reason'] = decision.reason;
     proxyToPlex(r);
 }
 
-function proxyToPlex(r) {
-    // 418 交给 nginx 的 error_page -> @plex_proxy，
-    // 命名 location 里用 $request_uri 回源，百分号编码不会丢。
-    r.return(418);
-}
-
-// Plex 在真正起播前会请求 decision；这里强制 directPlay，避免服务端转码把 302 链路绕开。
+// ------------------------------------------------ 起播决策：强制 directPlay
+// 对齐 plex-demo：decision 阶段改写参数强制 directPlay，避免服务端转码把 302 链路绕开。
+// decision 响应很小，用子请求回源并原样返回，不改动响应体（CD2 不需要补流信息）。
 async function decision(r) {
     reloadRuntime();
     let args = r.variables.args || '';
@@ -132,14 +236,13 @@ async function decision(r) {
             .replace(/&&+/g, '&');
         args += (args ? '&' : '') + 'directPlay=1&directStream=1';
     }
-    const sub = await r.subrequest('/__plex' + r.uri + (args ? '?' + args : ''), { method: r.method });
-    const headers = sub.headersOut;
-    for (const key in headers) {
-        const lower = key.toLowerCase();
-        if (lower === 'content-length' || lower === 'transfer-encoding' || lower === 'connection') continue;
-        r.headersOut[key] = headers[key];
+    try {
+        const sub = await r.subrequest('/__plex' + r.uri + (args ? '?' + args : ''), { method: r.method });
+        copyHeaders(sub.headersOut, r.headersOut);
+        r.return(sub.status, sub.responseText);
+    } catch (e) {
+        proxyToPlex(r);
     }
-    r.return(sub.status, sub.responseText);
 }
 
 export default { getPlex, redirect2Pan, decision };

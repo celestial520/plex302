@@ -10,6 +10,35 @@ Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 str
 
 ---
 
+## v1.7.0 更新
+
+> 拦截和播放对齐 [plex-demo](https://github.com/bpking1/embyExternalUrl) 的架构：**302 直链缓存搬到 nginx 共享内存**，命中即 302，连后端都不问。唯一保留的差异还是那一个 —— 它用 115 开放平台，我们用 Cookie。
+
+| 变化 | 说明 |
+|---|---|
+| **302 缓存上移到 nginx** | `js_shared_dict_zone routeDict`，worker 间共享、reload 不丢。命中直接 `r.return(302)`，**不走 Python、不打 115**；未命中才问后端 |
+| **拦截点补齐** | 对齐 plex-demo：metadata / sections / playQueues / decision / parts / start / session / streams 全覆盖 |
+| **失败一律回源** | 照抄它的 `fallbackUseOriginal`：后端挂了、直链失败、njs 异常，全部 `418 → @plex_proxy` 回源 Plex，绝不把 500 甩给播放器 |
+| **强制 directPlay** | 拦截 decision 改 `directPlay=1&directStream=1`；`directPlay=0` 的转码请求直接回源，不 302 |
+| **缓存按直链真实寿命** | 后端返回 `cache_ttl`（115 直链剩余寿命），写进共享内存 value；过期即失效，不会把过期直链甩给客户端。客户端 `Cache-Control` 也不超过它 |
+| **缓存键隔离** | 含 配置版本 / 客户端 IP / UA / 播放参数 / directPlay。UA 必须隔离（115 直链绑 UA），IP 隔离避免绕过「局域网回源」决策 |
+| **metadata 原生透传** | 拦截但**零改写**：plex-demo 给 STRM 注入假 `Stream`/container 是因为 Plex 扫 `.strm` 拿不到媒体信息；CD2 是真实文件，Plex 已扫到真实码率/编码，注入反而污染 |
+| **不做 partInfo 预存** | 同理：STRM 的 `part_file` 拿不到真实路径才需要在浏览阶段预存 `part.key → file`；CD2 真实文件由后端 `part_cache` 覆盖 |
+| **可一键退回** | 配置 `advanced.route_cache = false` 即回到「每次问后端」的旧行为 |
+
+**为什么改**：之前每个播放请求都要 `njs → Python /api/resolve` 往返一次，虽然有直链缓存不打 115，但链路长、后端抖动会影响起播。现在缓存命中时 nginx 直接 302，播放链路最短、最稳。
+
+**三层分工**（别再混）：
+- **入库**照抄 plex-demo：CD2 挂真实文件、compose 不写死路径、映射全在 WebUI 配，**不生成 STRM、不下载**。
+- **取直链**照抄 TgtoDrive 的 STRM 原理：它把 pickcode 写进 STRM，我们把「路径 → pickcode」写进本地索引（v1.6），起播都只剩 1 次取直链；这里用 115 Cookie，不用开放平台。
+- **拦截 / 播放**照抄 plex-demo（本次 v1.7）：拦截拓扑、nginx 共享内存 302 缓存、失败回源、强制 directPlay。它给 STRM 注入假流信息那一段不抄（CD2 是真实文件）。
+
+**实测**（真 nginx + 假 Plex + 假 115）：连续 20 次播放全部命中 `nginx-cache`，115 请求 **零增长**；后端停掉后新请求回源 Plex 200，播放不中断；metadata 响应原样透传未被改写。
+
+从 1.6.x 升级：无配置变化，直接换镜像。
+
+---
+
 ## v1.6.0 更新
 
 > 播放链路按 TgtoDrive 的原理重做：**STRM 里存的是 pickcode，我们存的是「路径 → pickcode」索引**，起播只剩 1 次取直链。

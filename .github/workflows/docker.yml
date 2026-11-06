@@ -218,6 +218,36 @@ jobs:
           echo "连续 6 次播放：今日 115 请求 $before -> $after"
           [ "$after" = "$before" ] || { echo "::error::连续播放仍在重复请求 115"; exit 1; }
 
+          echo "--- nginx 共享内存缓存命中（连后端都不问） ---"
+          # 用全新 UA 避开前面步骤写入的缓存；第 1 次问后端，之后命中 nginx-cache
+          UA="plex302-ci-cache/1.0"
+          curl -s -D h1.txt -o /dev/null -A "$UA" -H 'X-Forwarded-For: 8.8.8.8' \
+            'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+          first_reason=$(grep -i '^X-Plex302-Reason:' h1.txt | tr -d '\r')
+          echo "首次 $first_reason"
+          hit=0
+          for i in $(seq 1 5); do
+            curl -s -D h2.txt -o /dev/null -A "$UA" -H 'X-Forwarded-For: 8.8.8.8' \
+              'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+            grep -qi '^X-Plex302-Reason: *nginx-cache' h2.txt && hit=$((hit+1))
+          done
+          echo "后续 5 次命中 nginx 缓存=$hit"
+          [ "$hit" = "5" ] || { echo "::error::302 没有被 nginx 共享内存缓存命中"; cat h2.txt; exit 1; }
+
+          echo "--- metadata 原生透传（不改写 Plex 响应） ---"
+          curl -s -m 10 -H 'X-Forwarded-For: 8.8.8.8' -H 'X-Plex-Token: mock' \
+            'http://127.0.0.1:32500/library/metadata/9' -o meta.json
+          python3 -c "import json;d=json.load(open('meta.json'));assert d['MediaContainer']['Metadata'][0]['Media'][0]['Part'][0]['file']" \
+            || { echo "::error::metadata 响应被改写或损坏"; cat meta.json; exit 1; }
+
+          echo "--- 转码请求（directPlay=0）回源 Plex ---"
+          tc=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" \
+            'http://127.0.0.1:32500/video/:/transcode/universal/start?directPlay=0&X-Plex-Token=mock')
+          echo "转码请求状态=$tc 假 Plex 对 start 返回 404 属正常，关键是没 302"
+          curl -s -D h3.txt -o /dev/null -A "$UA" \
+            'http://127.0.0.1:32500/video/:/transcode/universal/start?directPlay=0&X-Plex-Token=mock'
+          grep -qi '^X-Plex302: *proxy' h3.txt || { echo "::error::转码请求没有回源"; cat h3.txt; exit 1; }
+
           echo "--- 局域网也 302 ---"
           curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
           python3 - <<'PY'

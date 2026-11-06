@@ -43,6 +43,15 @@ class TTLCache:
                     self._data.pop(k, None)
             self._data[key] = (time.time() + ttl, value)
 
+    def ttl(self, key: str) -> int:
+        """返回缓存剩余秒数（没有/已过期返回 0）。给 njs 的共享内存缓存对齐用。"""
+        now = time.time()
+        with self._lock:
+            item = self._data.get(key)
+            if not item:
+                return 0
+            return max(0, int(item[0] - now))
+
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
@@ -204,6 +213,17 @@ class Resolver:
         return out
 
     # ---------------------------------------------------------------- 主流程
+    def _redirect(self, url: str, reason: str, cloud_path: str, cache_key: str) -> Dict[str, Any]:
+        # cache_ttl = 直链缓存剩余寿命。njs 拿它设置共享内存缓存，
+        # 保证 nginx 缓存和 Python 直链缓存一起过期，不会把过期直链甩给播放器。
+        return {
+            "action": "redirect",
+            "url": url,
+            "reason": reason,
+            "cloud_path": cloud_path,
+            "cache_ttl": self.url_cache.ttl(cache_key),
+        }
+
     async def resolve(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         cfg = config.load()
         uri = str(payload.get("uri") or "")
@@ -251,7 +271,7 @@ class Resolver:
         cached = self.url_cache.get(cache_key)
         if cached:
             store.bump_stat("redirect")
-            return {"action": "redirect", "url": cached, "reason": "cache", "cloud_path": cloud_path}
+            return self._redirect(cached, "cache", cloud_path, cache_key)
 
         # 单飞：Plex 起播会并发打同一个 part，只让第一个请求真的去取直链
         lock = self._resolve_locks.get(cache_key)
@@ -265,7 +285,7 @@ class Resolver:
             cached = self.url_cache.get(cache_key)
             if cached:
                 store.bump_stat("redirect")
-                return {"action": "redirect", "url": cached, "reason": "cache-wait", "cloud_path": cloud_path}
+                return self._redirect(cached, "cache-wait", cloud_path, cache_key)
 
             try:
                 link = await asyncio.to_thread(
@@ -289,7 +309,7 @@ class Resolver:
                     f"[302] {ip or '-'} | {link.provider} | {cloud_path} -> {safe} | "
                     f"缓存 {ttl}s | {ua[:60]}"
                 )
-            return {"action": "redirect", "url": link.url, "reason": "ok", "cloud_path": cloud_path}
+            return self._redirect(link.url, "ok", cloud_path, cache_key)
 
     @staticmethod
     def _safe_url(url: str) -> str:
