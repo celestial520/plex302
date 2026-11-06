@@ -25,7 +25,7 @@
 
   const TITLES = {
     overview: ['概览', '外网 302、115 事件增量入库、每天全量兜底。'],
-    library: ['媒体库与整理', '链接入库、TMDB 识别改名归档，以及 Plex 媒体库路径与扫描。'],
+    library: ['媒体库与整理', 'Plex 媒体库路径与扫描、局部刷新与目录监听。'],
     scans: ['扫描记录', '局部扫描与全量同步的入队、执行结果和失败原因。'],
     settings: ['设置', '连接、路径映射、直链方式、自动入库、通知与安全。'],
     logs: ['日志', '302 决策、115 事件、扫描和错误都会记录。'],
@@ -247,7 +247,6 @@
         ? `${s.index.count} 个文件 · 已扫 ${s.index.dirs || 0} 个目录 · 今日 115 请求 ${s.u115_calls_today || 0}`
         : `未建立 · 今日 115 请求 ${s.u115_calls_today || 0}（设置 → 播放索引）`,
         (s.index && s.index.count) ? true : 'idle', '#i-link'],
-      ['链接入库', (s.ingest && s.ingest.enabled) ? `已启用 · 转存到 ${s.ingest.target || '未设置'}` : '未启用（企业微信发链接）', (s.ingest && s.ingest.enabled) ? true : 'idle', '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
       ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
@@ -384,29 +383,6 @@
   }
 
   // ------------------------------------------------------------------ 媒体库
-  async function submitIngest(btn) {
-    const el = $('#ingest-text');
-    const out = $('#ingest-result');
-    const text = (el && el.value || '').trim();
-    if (!text) { toast('先粘贴链接', 'bad'); return; }
-    if (btn) btn.disabled = true;
-    if (out) out.textContent = '提交中…';
-    try {
-      const res = await api('/api/ingest', { method: 'POST', body: { text } });
-      const items = (res.data && res.data.results) || [];
-      const ok = items.filter((x) => x.ok).length;
-      const msg = `已提交 ${ok}/${items.length} 条到 ${res.data.target || ''}`;
-      if (out) out.textContent = msg;
-      toast(msg, ok ? 'ok' : 'bad');
-      if (el) el.value = '';
-      loadOrganize();
-    } catch (err) {
-      if (out) out.textContent = err.message || '入库失败';
-      toast(err.message || '入库失败', 'bad');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
 
   function renderLibraries() {
     const body = $('#lib-body');
@@ -552,9 +528,9 @@
     const mounts = (c.mounts && c.mounts.length ? c.mounts : [{ name: 'CD2', plex_prefix: '', cloud_prefix: '/', cd2_prefix: '' }]);
     const mountRows = mounts.map((m) => `
       <div class="mount-row">
-        <input class="input mount-plex" placeholder="/mnt/cd2/115" value="${esc(m.plex_prefix)}">
-        <input class="input mount-cloud" placeholder="/" value="${esc(m.cloud_prefix)}">
-        <input class="input mount-cd2" placeholder="/115（可留空）" value="${esc(m.cd2_prefix)}">
+        <input class="input mount-plex" placeholder="① Plex 容器内路径，如 /media" value="${esc(m.plex_prefix)}">
+        <input class="input mount-cloud" placeholder="② 115 网盘内路径，如 /media" value="${esc(m.cloud_prefix)}">
+        <input class="input mount-cd2" placeholder="③ CD2 内部路径，可留空" value="${esc(m.cd2_prefix)}">
         <button class="icon-btn mount-del" title="删除"><svg><use href="#i-trash"></use></svg></button>
       </div>`).join('');
 
@@ -619,11 +595,18 @@
         <div class="field full"><div class="field-row"><button class="btn sm" id="btn-test-cd2">测试 CD2</button><span class="desc" id="cd2-test-result"></span></div></div>
       `)}
 
-      ${section('路径映射', '把 Plex 看到的本地挂载路径，映射成云盘路径（给 115 用）和 CD2 内部路径（给刷新缓存用）。三列都支持留空。', `
+      ${section('路径映射', '从左到右三列：① Plex 容器里看到的路径 → ② 115 网页版网盘里的真实路径 → ③ CD2 内部路径（只用于刷新缓存）。①必填，③可留空。', `
         <div class="field full">
-          <div class="callout info">例：Plex 里是 <code>/mnt/cd2/115/电影/沙丘2</code>，115 网盘根目录对应 <code>/</code>，CD2 内部是 <code>/115/电影/沙丘2</code>：
-          <br>Plex 前缀 <code>/mnt/cd2/115</code> · 云盘前缀 <code>/</code> · CD2 前缀 <code>/115</code>。</div>
+          <div class="callout info">例：Plex 里是 <code>/media/电影/沙丘2.mkv</code>，115 网盘里是 <code>/media/电影/沙丘2.mkv</code>，CD2 内部是 <code>/115open/media/电影/沙丘2.mkv</code>：
+          <br>① Plex 前缀 <code>/media</code> · ② 云盘前缀 <code>/media</code> · ③ CD2 前缀 <code>/115open/media</code>（不填 CD2 API Token 时③留空即可）。
+          <br><b>注意：CD2 挂载点名（如 <code>115open</code>）打开就是网盘根目录，它不是网盘里的真实文件夹</b>，所以②里千万不要带上这层，程序是从 115 网盘根逐级按文件夹名查找的。</div>
         </div>
+        <div class="field full"><div class="mount-row mount-head">
+          <span class="mount-plex">① Plex 前缀 <b>必填</b></span>
+          <span class="mount-cloud">② 云盘前缀（115 用）</span>
+          <span class="mount-cd2">③ CD2 前缀（可留空）</span>
+          <span></span>
+        </div></div>
         <div class="field full" id="mount-list">${mountRows}</div>
         <div class="field full"><button class="btn sm" id="btn-add-mount"><svg><use href="#i-plus"></use></svg>添加一条映射</button></div>
       `, true)}
@@ -664,27 +647,6 @@
         </div>
       `, true)}
 
-      ${section('链接入库（企业微信）', '把 115 分享 / 磁力 / ed2k 发到企业微信，自动转存到指定目录。', `
-        <div class="field full">
-          ${switchLine('启用链接入库', '接收 115 分享链接、磁力、ed2k，自动转存', 'cfg-ingest-enabled', c.ingest.enabled)}
-        </div>
-        <div class="field"><label>入库目录</label>${input('cfg-ingest-target', c.ingest.target_dir, '')}</div>
-        <div class="field"><label>允许的成员 UserID（可选）</label>${input('cfg-ingest-users', c.ingest.allow_users, 'zhangsan,lisi')}
-          <span class="desc">留空 = 应用可见范围内所有人都能用。</span></div>
-        <div class="field full"><label>企业微信回调地址</label>
-          <div class="field-row"><input class="input" id="cfg-wecom-callback" readonly value="${esc((state.status && state.status.wecom_callback) || '')}"><button class="btn sm" id="btn-copy-wecom"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc">企业微信 → 应用 → 接收消息 → 设置 API 接收。URL 填这个，Token 和 EncodingAESKey 填下面两栏。</span>
-        </div>
-        <div class="field"><label>回调 Token</label>${input('cfg-ingest-token', c.ingest.wecom_token, '自己填一串，和企微后台一致')}</div>
-        <div class="field"><label>EncodingAESKey</label>${input('cfg-ingest-aes', '', c.ingest.wecom_aes_key_set ? '已保存，留空不修改' : '企微后台随机生成的 43 位', 'password')}</div>
-        <div class="field full">
-          <div class="callout warn">
-            企业微信要求回调地址<b>公网可达</b>（HTTPS 或 80 端口）。手机微信里给这个应用发消息也能用：
-            企业微信绑定微信后，消息会进同一个会话。<br>
-            指令：直接发链接 → 转存；发「状态」→ 看最近结果。
-          </div>
-        </div>
-      `)}
 
       ${section('增量入库（115 操作事件）', '115 里上传 / 移动 / 改名 → 「最近操作」出现事件 → 静置合并 → 局部扫描。主通道，比轮询目录可靠。', `
         <div class="field full">
@@ -937,7 +899,7 @@
       const wrap = $('#mount-list');
       const div = document.createElement('div');
       div.className = 'mount-row';
-      div.innerHTML = '<input class="input mount-plex" placeholder="/mnt/cd2/115"><input class="input mount-cloud" placeholder="/"><input class="input mount-cd2" placeholder="/115（可留空）"><button class="icon-btn mount-del" title="删除"><svg><use href="#i-trash"></use></svg></button>';
+      div.innerHTML = '<input class="input mount-plex" placeholder="① Plex 容器内路径，如 /media"><input class="input mount-cloud" placeholder="② 115 网盘内路径，如 /media"><input class="input mount-cd2" placeholder="③ CD2 内部路径，可留空"><button class="icon-btn mount-del" title="删除"><svg><use href="#i-trash"></use></svg></button>';
       wrap.appendChild(div);
       bindMountDelete(div);
     });
@@ -1005,8 +967,6 @@
         toast('测试消息已发送', 'ok');
       } catch (err) { out.textContent = err.message || '发送失败'; }
     });
-    const copyWecom = $('#btn-copy-wecom');
-    if (copyWecom) copyWecom.addEventListener('click', () => copyText($('#cfg-wecom-callback').value));
     $$('[data-theme-seg] button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.mode)));
     applyTheme(themeMode(), false);
     $('#btn-change-pass').addEventListener('click', async () => {
@@ -1167,7 +1127,6 @@
       } catch (err) { toast(err.message, 'bad'); }
     });
     $('#btn-scan-refresh').addEventListener('click', loadScans);
-    $('#btn-ingest').addEventListener('click', (e) => submitIngest(e.currentTarget));
     $('#btn-run-watch').addEventListener('click', async () => {
       const btn = $('#btn-run-watch'); btn.disabled = true;
       try {

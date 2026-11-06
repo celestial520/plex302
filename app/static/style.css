@@ -300,6 +300,9 @@ input[type="time"] { cursor: pointer; }
 .switch-line .txt span { display: block; color: var(--muted-2); font-size: 11px; margin-top: 3px; line-height: 1.5; }
 
 .mount-row { display: grid; grid-template-columns: 1fr 1fr 1fr 38px; gap: 8px; margin-bottom: 8px; }
+.mount-row.mount-head { margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.mount-head span { line-height: 1.4; }
+.mount-head b { color: var(--amber); }
 .icon-btn { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; border: 1px solid var(--line); background: transparent; color: var(--muted); flex: 0 0 auto; }
 .icon-btn:hover { color: var(--bad-text); border-color: rgba(248, 113, 113, .35); }
 .icon-btn svg { width: 15px; height: 15px; }
