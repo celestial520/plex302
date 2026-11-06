@@ -42,11 +42,9 @@ async def lifespan(app: FastAPI):
     await events.event_watcher.start()
     await scheduler.scheduler.start()
     notify_task = asyncio.create_task(notify.flush_loop(), name="notify-flush")
-    index_task = asyncio.create_task(_auto_index(), name="auto-index")
     log_task = asyncio.create_task(_tail_302_log(), name="302-log")
     yield
     log_task.cancel()
-    index_task.cancel()
     notify_task.cancel()
     await scheduler.scheduler.stop()
     await events.event_watcher.stop()
@@ -54,28 +52,6 @@ async def lifespan(app: FastAPI):
     await scanner.scanner.stop()
     logger.info("Plex302 已停止")
 
-
-async def _auto_index() -> None:
-    """首次启动后台建一次「路径 -> pick_code」索引。
-
-    相当于 TgtoDrive 整理时把 pickcode 写进 STRM：不建索引的话，第一次起播
-    还得逐级列目录，一部片就是 3~4 个 115 请求。建好后起播只剩 1 次取直链。
-    只在有 Cookie、有挂载、索引为空时跑；全程走 2.05 秒闸门，可随时在 WebUI 停。
-    """
-    if os.getenv("PLEX302_AUTO_INDEX", "1") == "0":
-        return
-    await asyncio.sleep(30)
-    try:
-        cfg = config.load()
-        if not u115web.has_cookie(cfg) or not cfg.get("mounts") or store.index_count():
-            return
-        logger.info("[索引] 首次启动，后台建立 115 播放索引（路径 → pick_code）")
-        await indexer.index_builder.start(force=False)
-    except Exception as err:  # noqa: BLE001 索引失败绝不能影响服务启动
-        logger.warn(f"[索引] 自动构建跳过：{err}")
-
-
-NGINX_302_LOG = Path("/var/log/nginx/302.log")
 
 
 async def _tail_302_log() -> None:

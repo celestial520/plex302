@@ -243,10 +243,6 @@
         : (evSummary.first_run ? '已记录游标，等待新事件'
           : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')),
         !!ev.cookie_set && evSummary.ok !== false, '#i-events'],
-      ['播放索引', (s.index && s.index.count)
-        ? `${s.index.count} 个文件 · 已扫 ${s.index.dirs || 0} 个目录 · 今日 115 请求 ${s.u115_calls_today || 0}`
-        : `未建立 · 今日 115 请求 ${s.u115_calls_today || 0}（设置 → 播放索引）`,
-        (s.index && s.index.count) ? true : 'idle', '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
       ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
@@ -575,18 +571,6 @@
         <div class="field full"><span class="desc">「测试 Cookie」只发 1 个 115 请求验登录态；「测完整链路」会连续请求最近文件 / 目录 / 直链，115 风控时可能返回 405。<b>同一份 Cookie 别让 CMS 等多个工具同时高频使用</b>；被风控后暂停 5~10 分钟再试，不必重复制 Cookie。</span></div>
       `, true)}
 
-      ${section('播放索引', '把「云盘路径 → pick_code」提前存进本地库。Plex 起播时只发 1 个 115 请求；不建索引的话，一个文件第一次播放要逐级列 3~4 层目录。', `
-        <div class="field full">
-          <div class="callout info" id="index-box">读取中…</div>
-        </div>
-        <div class="field full"><div class="field-row">
-          <button class="btn sm" id="btn-index-build">建立索引</button>
-          <button class="btn sm ghost" id="btn-index-rebuild">重新扫描</button>
-          <button class="btn sm ghost" id="btn-index-stop">停止</button>
-          <button class="btn sm ghost" id="btn-index-clear">清空</button>
-          <span class="desc" id="index-result"></span>
-        </div></div>
-      `, true)}
 
       ${section('CloudDrive2', 'CD2 只做「给 Plex 挂载」和「刷目录缓存」。<b>API Token 可以留空</b>：不填就跳过缓存刷新，Plex 照样能扫到文件。', `
         <div class="field"><label>gRPC 地址</label>${input('cfg-cd2-address', c.cd2.address, '127.0.0.1:19798')}</div>
@@ -732,7 +716,6 @@
     `;
     $('#settings-body').innerHTML = html;
     bindSettings();
-    loadIndexStatus();
   }
 
   async function runEvents(btn, out) {
@@ -769,59 +752,6 @@
     } finally {
       if (btn) btn.disabled = false;
     }
-  }
-
-  async function buildIndex(force) {
-    const btn = force ? $('#btn-index-rebuild') : $('#btn-index-build');
-    const out = $('#index-result');
-    if (btn) btn.disabled = true;
-    if (out) out.textContent = '已提交，后台按 2.05 秒节奏扫描…';
-    try {
-      await api('/api/index/build', { method: 'POST', body: { force: !!force } });
-      toast(force ? '重新扫描已开始' : '索引构建已开始', 'ok');
-      loadIndexStatus();
-      let tries = 0;
-      const timer = setInterval(async () => {
-        tries += 1;
-        const d = await loadIndexStatus();
-        if (!d || !d.running) {
-          clearInterval(timer);
-          if (btn) btn.disabled = false;
-        } else if (tries > 200) {
-          clearInterval(timer);
-        }
-      }, 3000);
-    } catch (err) {
-      if (out) out.textContent = err.message || '启动失败';
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  async function loadIndexStatus() {
-    try {
-      const res = await api('/api/index/status');
-      renderIndexBox(res.data || {});
-      return res.data || {};
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function renderIndexBox(d) {
-    const box = $('#index-box');
-    const out = $('#index-result');
-    if (box) {
-      const parts = [
-        `<b>${d.indexed || 0}</b> 个文件已建索引`,
-        `已扫 <b>${d.dirs || 0}</b> 个目录`,
-      ];
-      if (d.running) parts.push(`<span class="badge">正在扫描</span>`);
-      else if (d.done) parts.push(`<span class="badge ok">已完成</span>`);
-      box.innerHTML = parts.join(' · ')
-        + (d.error ? `<br><span style="color:var(--bad)">${esc(d.error)}</span>` : '')
-        + `<br><span class="desc">未建索引也能播，只是第一次播放一个文件会多打 3~4 次 115 列目录。</span>`;
-    }
-    if (out && d.running) out.textContent = `扫描中：${d.dirs || 0} 个目录 / ${d.files || 0} 个视频`;
   }
 
   async function runFull(out) {
@@ -930,29 +860,6 @@
     if (watchRun) watchRun.addEventListener('click', () => runWatch(watchRun));
     const watchRun2 = $('#btn-watch-run-2');
     if (watchRun2) watchRun2.addEventListener('click', () => runWatch(watchRun2));
-    const indexBuild = $('#btn-index-build');
-    if (indexBuild) indexBuild.addEventListener('click', () => buildIndex(false));
-    const indexRebuild = $('#btn-index-rebuild');
-    if (indexRebuild) indexRebuild.addEventListener('click', () => buildIndex(true));
-    const indexStop = $('#btn-index-stop');
-    if (indexStop) indexStop.addEventListener('click', async () => {
-      try {
-        await api('/api/index/stop', { method: 'POST', body: {} });
-        toast('索引扫描已停止', 'ok');
-        loadIndexStatus();
-      } catch (err) { toast(err.message, 'bad'); }
-    });
-    const indexClear = $('#btn-index-clear');
-    if (indexClear) indexClear.addEventListener('click', async () => {
-      if (!confirm('清空播放索引？下次播放会重新逐级解析目录。')) return;
-      const out = $('#index-result');
-      out.textContent = '清空中…';
-      try {
-        await api('/api/index/clear', { method: 'POST', body: {} });
-        out.textContent = '已清空';
-        loadIndexStatus();
-      } catch (err) { out.textContent = err.message || '清空失败'; }
-    });
     const eventsRun = $('#btn-events-run');
     if (eventsRun) eventsRun.addEventListener('click', () => runEvents(eventsRun, $('#events-run-result')));
     const fullBtn = $('#btn-full-run-settings');
