@@ -55,6 +55,9 @@ async def lifespan(app: FastAPI):
 
 
 
+NGINX_302_LOG = Path("/var/log/nginx/302.log")
+
+
 async def _tail_302_log() -> None:
     """把 nginx 的 302 决策日志搬进 WebUI 日志页，并统一「今日 302」统计口径。
 
@@ -864,12 +867,47 @@ async def emby_item_refresh(request: Request, item_id: str) -> Any:
     return Response(status_code=204)
 
 
+def _nginx_302_lines(limit: int = 60) -> List[str]:
+    """直接读 302.log 尾部的决策行。
+
+    轮询任务每 2 秒才搬一次，刚起播就打开日志页会看不到；轮询任务万一挂了，
+    这一页也不该整页空白。所以接口侧再补一刀（只在缓冲里没有 302 行时补，
+    避免和轮询搬进来的行重复）。
+    """
+    try:
+        with NGINX_302_LOG.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 128 * 1024))
+            raw = fh.read().decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return []
+    out: List[str] = []
+    for line in raw[-max(20, limit):]:
+        parts = line.split("|", 5)
+        if len(parts) < 6:
+            continue
+        stamp, ip, status, action, reason, uri = parts
+        if action not in ("redirect", "proxy"):
+            continue
+        tag = "302" if action == "redirect" else "回源"
+        out.append(
+            f"{stamp.strip()} | INFO  | [{tag}] {ip.strip()} | {status.strip()} | "
+            f"{reason.strip() or '-'} | {uri.strip()}"
+        )
+    return out
+
+
 # --------------------------------------------------------------------- 日志
 @app.get("/api/logs")
 async def api_logs(lines: int = 300, keyword: str = "") -> Any:
     data = logger.tail(lines, keyword)
     if not data:
         data = logger.read_file_tail(lines)
+    if not keyword and not any(("[302]" in x or "[回源]" in x) for x in data):
+        extra = _nginx_302_lines(lines)
+        if extra:
+            data = (data + extra)[-max(1, min(int(lines), 2000)):]
     return _ok(data)
 
 
