@@ -20,7 +20,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -602,14 +602,22 @@ async def api_115_cookie_test(request: Request) -> Any:
     except Exception:  # noqa: BLE001
         body = {}
     cookie = str((body or {}).get("cookie") or "").strip()
+    full = bool((body or {}).get("full"))
     cfg = config.load()
     if cookie:
         cfg["u115"]["cookie"] = u115web.normalize_cookie(cookie)
+    if full and u115web.risk_active():
+        return _err(
+            u115web.RISK_HINT
+            + "（完整链路会连续请求 115，请等 30 秒冷却结束后再测；轻量「测试 Cookie」不受影响）"
+        )
     try:
-        result = await asyncio.to_thread(u115web.test, cfg)
+        result = await asyncio.to_thread(u115web.test, cfg, full)
     except u115web.Web115Error as err:
         return _err(str(err))
-    # 顺带验证生活事件接口（真正的增量来源）
+    if not full:
+        return _ok(result)
+    # 只有「测完整链路」才顺带验证生活事件接口（真正的增量来源）
     try:
         ev = await asyncio.to_thread(u115events.test, cfg, 5)
         result["events"] = ev["count"]

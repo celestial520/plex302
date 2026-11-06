@@ -28,6 +28,13 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages requests
           python3 tests/test_play_once.py
 
+      - name: 405 风控回归（测试 Cookie 只打一次 115）
+        run: |
+          set -e
+          python3 -c 'import requests' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages requests
+          python3 tests/test_risk_405.py
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 

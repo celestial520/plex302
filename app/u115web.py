@@ -7,7 +7,10 @@
 
 Cookie 从浏览器 F12 → Network → 任意 webapi.115.com 请求里复制，
 形如 `UID=xxx; CID=yyy; SEID=zzz; KID=www`。
-Cookie 失效时 115 会返回 HTTP 405，这里统一转成可读错误。
+115 的 405 是「风控 / 登录态被临时限制」的信号，不是 HTTP 方法用错：
+  - 同一份 Cookie 被 CMS 等多个工具同时高频请求、或短时间请求过密，都会触发；
+  - 在别处重新登录 115 挤掉旧会话，也会返回 405。
+触发后全局退避 30 秒，避免风控窗口里继续猛打把限制加重。
 
 两个坑（踩过）：
 1. cid 是 64 位整数，全程必须当字符串传，转成 float 会丢精度，接口直接报“服务器开小差”
@@ -38,13 +41,46 @@ EXPIRE_ERRNOS = {990001, 40101017, 40101019}
 # ——直链有 5~10 分钟目录缓存 + 30 分钟 pick_code 缓存，实际很少打 115。
 API_GAP = 2.05
 FAST_GAP = 0.35
+RISK_COOLDOWN = 30.0  # 收到 405 后暂停所有 115 请求，等风控窗口过去
 
 _pace_lock = threading.Lock()
 _last_call = 0.0
+_risk_lock = threading.Lock()
+_risk_until = 0.0
+
+RISK_HINT = (
+    "115 触发风控（405），不是 Cookie 失效：请暂停 CMS 等共用同一 Cookie 的工具，"
+    "等 5~10 分钟再试；若刚在别处重新登录过 115，请重新复制 Cookie"
+)
 
 
-def pace(fast: bool = False) -> None:
-    """所有 115 请求的统一节流闸门。"""
+def _risk_mark() -> None:
+    """标记进入风控冷却，之后所有 115 请求统一退避。"""
+    global _risk_until
+    with _risk_lock:
+        _risk_until = max(_risk_until, time.monotonic() + RISK_COOLDOWN)
+
+
+def _risk_wait() -> None:
+    with _risk_lock:
+        wait = _risk_until - time.monotonic()
+    if wait > 0:
+        time.sleep(min(wait, RISK_COOLDOWN))
+
+
+def risk_active() -> bool:
+    """当前是否还在 405 风控冷却期内。"""
+    with _risk_lock:
+        return _risk_until > time.monotonic()
+
+
+def is_risk_message(msg: str) -> bool:
+    """115 有时用 HTTP 200 + JSON error="405 METHOD NOT ALLOWED" 表达风控。"""
+    text = str(msg or "").upper()
+    return "405" in text or "METHOD NOT ALLOWED" in text or "NOT ALLOWED" in text
+
+
+def _pace_gap(fast: bool) -> None:
     global _last_call
     gap = FAST_GAP if fast else API_GAP
     with _pace_lock:
@@ -54,8 +90,33 @@ def pace(fast: bool = False) -> None:
         _last_call = time.monotonic()
 
 
+def pace(fast: bool = False) -> None:
+    """所有 115 请求的统一节流闸门（含 405 风控退避）。
+
+    保持单参数签名：外部（含回归测试）可能 patch 这个函数来跳过节流。
+    """
+    _risk_wait()
+    _pace_gap(fast)
+
+
+def pace_skip_risk(fast: bool = False) -> None:
+    """用户主动点「测试 Cookie」用：风控冷却期内也要立刻发出去。
+
+    否则用户想确认 115 是否恢复，反而要干等 30 秒。后台任务一律遵守退避。
+    """
+    _pace_gap(fast)
+
+
 class Web115Error(Exception):
     pass
+
+
+class Web115RiskError(Web115Error):
+    """115 返回 405：风控 / 登录态被临时限制，不是 Cookie 格式问题。
+
+    继承 Web115Error，所有既有的 except Web115Error 分支照常兜住，但文案明确
+    告诉用户「不是 Cookie 坏了，先别急着重新复制」。
+    """
 
 
 def _count_call(n: int = 1) -> None:
@@ -103,8 +164,12 @@ def _get(
     timeout: int = 15,
     base: Optional[str] = None,
     fast: bool = False,
+    skip_risk: bool = False,
 ) -> Dict[str, Any]:
-    pace(fast)
+    if skip_risk:
+        pace_skip_risk(fast)
+    else:
+        pace(fast)
     _count_call()
     url = (base or BASE) + path
     headers = {
@@ -117,8 +182,9 @@ def _get(
         resp = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
     except requests.RequestException as err:
         raise Web115Error(f"请求 115 失败：{err}") from err
-    if resp.status_code == 405:
-        raise Web115Error("115 Cookie 已失效（405），请重新从浏览器复制")
+    if resp.status_code in (405, 403):
+        _risk_mark()
+        raise Web115RiskError(RISK_HINT)
     if resp.status_code != 200:
         raise Web115Error(f"115 返回 HTTP {resp.status_code}")
     try:
@@ -131,6 +197,9 @@ def _get(
     errno = payload.get("errno") or payload.get("errNo") or 0
     if state is False or errno in EXPIRE_ERRNOS:
         msg = payload.get("error") or payload.get("message") or f"errno={errno}"
+        if is_risk_message(msg) or str(errno) in ("405", "403"):
+            _risk_mark()
+            raise Web115RiskError(RISK_HINT)
         if errno in EXPIRE_ERRNOS or "登录" in str(msg):
             raise Web115Error(f"115 Cookie 已失效：{msg}")
         raise Web115Error(f"115 接口报错：{msg}")
@@ -143,9 +212,13 @@ def _get_with_ua(
     params: Optional[Dict[str, Any]] = None,
     ua: str = "",
     timeout: int = 20,
+    skip_risk: bool = False,
 ) -> Dict[str, Any]:
     """和 _get 一样，但可以指定 UA —— 115 直链和请求 UA 绑定。"""
-    pace(True)
+    if skip_risk:
+        pace_skip_risk(True)
+    else:
+        pace(True)
     _count_call()
     url = BASE + path
     headers = {
@@ -158,8 +231,9 @@ def _get_with_ua(
         resp = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
     except requests.RequestException as err:
         raise Web115Error(f"请求 115 失败：{err}") from err
-    if resp.status_code == 405:
-        raise Web115Error("115 Cookie 已失效（405），请重新从浏览器复制")
+    if resp.status_code in (405, 403):
+        _risk_mark()
+        raise Web115RiskError(RISK_HINT)
     if resp.status_code != 200:
         raise Web115Error(f"115 返回 HTTP {resp.status_code}")
     try:
@@ -169,6 +243,10 @@ def _get_with_ua(
     if not isinstance(payload, dict):
         raise Web115Error("115 返回格式异常")
     errno = payload.get("errno") or payload.get("errNo") or 0
+    msg = payload.get("error") or payload.get("message") or ""
+    if is_risk_message(msg) or str(errno) in ("405", "403"):
+        _risk_mark()
+        raise Web115RiskError(RISK_HINT)
     if payload.get("state") is False and errno in EXPIRE_ERRNOS:
         raise Web115Error("115 Cookie 已失效，请重新复制")
     return payload
@@ -583,10 +661,18 @@ def recent(cfg: Dict[str, Any], limit: int = 50, offset: int = 0) -> List[Dict[s
     params = {"limit": int(limit), "offset": int(offset), "type": 0}
     try:
         payload = _get(cfg, "/files/recent", params)
+    except Web115RiskError as err:
+        # 风控窗口里打任何接口都会被拦，别在这里再退避 30 秒重试。
+        # 「最近文件」只是兜底通道，跳过一轮不影响播放和入库。
+        logger.warn(f"[115] 最近文件接口被风控，本轮跳过：{str(err)[:80]}")
+        return []
     except Web115Error as err:
         # 少数账号/版本上 /files/recent 会返回“服务器开小差”，退回最近接收
         if "开小差" in str(err) or "参数" in str(err):
-            payload = _get(cfg, "/rb/recent", {"limit": int(limit), "offset": int(offset)})
+            try:
+                payload = _get(cfg, "/rb/recent", {"limit": int(limit), "offset": int(offset)})
+            except Web115Error:
+                return []
         else:
             raise
     data = payload.get("data")
@@ -630,21 +716,53 @@ def folder_path(cfg: Dict[str, Any], cid: str) -> str:
     return result
 
 
-def test(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """测试 Cookie：最近文件 + 操作事件 + 目录反查 + 取一次直链。"""
-    items = recent(cfg, limit=5)
-    sample = items[0] if items else None
-    path = ""
-    if sample and sample.get("cid"):
-        path = folder_path(cfg, sample["cid"]).rstrip("/") + "/" + sample["name"]
-    result: Dict[str, Any] = {"ok": True, "count": len(items), "sample": sample, "path": path}
-    # 顺手验证「路径 -> pick_code -> 直链」这条真正的播放链路
-    if path and sample and not sample.get("is_dir"):
-        try:
-            link = file_url_by_path(cfg, path, DEFAULT_UA)
-            result["link"] = {"pick_code": link["pick_code"], "url": link["url"][:120] + "…"}
-        except Web115Error as err:
-            result["link_error"] = str(err)
+def check_login(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """验登录态：只打 1 个最稳的请求（/files?cid=0&limit=1）。
+
+    以前「测试 Cookie」一次连打 6 个请求，第一个就是最容易被风控的
+    /files/recent；CMS 同时在跑时几乎必撞 405，把好 Cookie 误报成「接口报错」。
+    p115client 也是用 /files 验 Cookie 的。
+    """
+    payload = _get(
+        cfg, "/files",
+        {"aid": 1, "cid": "0", "show_dir": 1, "limit": 1, "format": "json"},
+        skip_risk=True,
+    )
+    data = payload.get("data")
+    if isinstance(data, dict):
+        data = data.get("list") or []
+    return {"ok": True, "count": len(data) if isinstance(data, list) else 0}
+
+
+def test(cfg: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
+    """测试 Cookie。默认只验登录态（1 个请求）；full=True 才跑完整播放链路。
+
+    完整链路（最近文件 → 目录反查 → 取直链）是可选诊断：任一步失败只写
+    *_error，不改变「Cookie 可用」的结论，也不会因为风控把整个测试判红。
+    """
+    result: Dict[str, Any] = check_login(cfg)
+    if not full:
+        return result
+    try:
+        items = recent(cfg, limit=5)
+        if not items and risk_active():
+            # recent() 会吞掉风控异常，这里把原因显式带回 WebUI，别让用户以为没数据
+            result["recent_error"] = RISK_HINT
+        sample = items[0] if items else None
+        result["recent_count"] = len(items)
+        result["sample"] = sample
+        path = ""
+        if sample and sample.get("cid"):
+            path = folder_path(cfg, sample["cid"]).rstrip("/") + "/" + sample["name"]
+        result["path"] = path
+        if path and sample and not sample.get("is_dir"):
+            try:
+                link = file_url_by_path(cfg, path, DEFAULT_UA)
+                result["link"] = {"pick_code": link["pick_code"], "url": link["url"][:120] + "…"}
+            except Web115Error as err:
+                result["link_error"] = str(err)
+    except Web115Error as err:
+        result["recent_error"] = str(err)
     return result
 
 
@@ -657,5 +775,5 @@ def self_test() -> Dict[str, Any]:
         result = test(cfg)
     except Web115Error as err:
         return {"ok": False, "error": str(err)}
-    logger.info(f"[115] Cookie 测试通过，最近文件 {result['count']} 条")
+    logger.info(f"[115] Cookie 测试通过，根目录 {result['count']} 项")
     return result

@@ -593,8 +593,10 @@
         </div>
         <div class="field full"><div class="field-row">
           <button class="btn sm" id="btn-115-cookie-test">测试 Cookie</button>
+          <button class="btn sm ghost" id="btn-115-cookie-full">测完整链路</button>
           <span class="desc" id="cookie-test-result"></span>
         </div></div>
+        <div class="field full"><span class="desc">「测试 Cookie」只发 1 个 115 请求验登录态；「测完整链路」会连续请求最近文件 / 目录 / 直链，115 风控时可能返回 405。<b>同一份 Cookie 别让 CMS 等多个工具同时高频使用</b>；被风控后暂停 5~10 分钟再试，不必重复制 Cookie。</span></div>
       `, true)}
 
       ${section('播放索引', '把「云盘路径 → pick_code」提前存进本地库。Plex 起播时只发 1 个 115 请求；不建索引的话，一个文件第一次播放要逐级列 3~4 层目录。', `
@@ -933,22 +935,28 @@
       bindMountDelete(div);
     });
     bindMountDelete($('#mount-list'));
-    $('#btn-115-cookie-test').addEventListener('click', async () => {
+    const cookieTest = async (full) => {
       const out = $('#cookie-test-result');
       const cookie = ($('#cfg-115-cookie').value || '').trim();
-      out.textContent = '测试中…';
+      out.textContent = full ? '完整链路测试中（会连续请求 115）…' : '测试中…';
       try {
-        const res = await api('/api/115/cookie/test', { method: 'POST', body: { cookie } });
+        const res = await api('/api/115/cookie/test', { method: 'POST', body: { cookie, full } });
         const d = res.data || {};
-        out.textContent = `Cookie 可用：最近文件 ${d.count || 0} 条`
+        out.textContent = 'Cookie 可用（登录态正常）'
+          + (d.count != null ? ` · 根目录 ${d.count} 项` : '')
+          + (d.recent_count != null ? ` · 最近文件 ${d.recent_count} 条` : '')
           + (d.events != null ? ` · 操作事件 ${d.events} 条` : '')
-          + (d.events_error ? `（事件接口：${d.events_error}）` : '')
           + (d.link ? ' · 直链 OK' : '')
+          + (d.recent_error ? `（最近文件：${d.recent_error}）` : '')
+          + (d.events_error ? `（事件接口：${d.events_error}）` : '')
           + (d.link_error ? `（直链：${d.link_error}）` : '');
       } catch (err) {
         out.textContent = err.message || 'Cookie 测试失败';
       }
-    });
+    };
+    $('#btn-115-cookie-test').addEventListener('click', () => cookieTest(false));
+    const cookieFullBtn = $('#btn-115-cookie-full');
+    if (cookieFullBtn) cookieFullBtn.addEventListener('click', () => cookieTest(true));
     const watchRun = $('#btn-watch-run');
     if (watchRun) watchRun.addEventListener('click', () => runWatch(watchRun));
     const watchRun2 = $('#btn-watch-run-2');

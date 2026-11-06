@@ -40,8 +40,9 @@ def _post(
         resp = requests.post(url, data=data, headers=headers, timeout=timeout)
     except requests.RequestException as err:
         raise u115web.Web115Error(f"请求 115 失败：{err}") from err
-    if resp.status_code == 405:
-        raise u115web.Web115Error("115 Cookie 已失效或被风控（405），稍后再试或重新复制 Cookie")
+    if resp.status_code in (405, 403):
+        u115web._risk_mark()  # noqa: SLF001
+        raise u115web.Web115RiskError(u115web.RISK_HINT)
     if resp.status_code != 200:
         raise u115web.Web115Error(f"115 返回 HTTP {resp.status_code}")
     try:
@@ -54,6 +55,9 @@ def _post(
     errno = payload.get("errno") or payload.get("errNo") or 0
     if state is False or errno in u115web.EXPIRE_ERRNOS:
         msg = payload.get("error") or payload.get("message") or f"errno={errno}"
+        if u115web.is_risk_message(msg) or str(errno) in ("405", "403"):
+            u115web._risk_mark()  # noqa: SLF001
+            raise u115web.Web115RiskError(u115web.RISK_HINT)
         if errno in u115web.EXPIRE_ERRNOS or "登录" in str(msg):
             raise u115web.Web115Error(f"115 Cookie 已失效：{msg}")
         raise u115web.Web115Error(f"115 操作失败：{msg}")
