@@ -27,6 +27,9 @@ VIDEOISH_DIR_TYPES = {17, 18, 20}
 # 115 对高频接口调用比较敏感（风控会返回 405/403），
 # 反查目录路径是按目录缓存的，这里再给每条新事件加一点间隔。
 EVENT_DELAY = 2.05  # 和 CMS 的 2 秒对齐：反查目录是 115 最敏感的接口
+HARD_MAX_PAGES = 30  # 常规单轮翻页上限（limit=100 即 3000 条）
+PAGE_BUDGET_MAX = 200  # 积压时最多加深到 200 页（2 万条），再追不平就显式告警
+MAX_EVENT_RETRY = 5  # 单条事件处理失败最多重试 5 轮，之后放弃并告警（避免无限重试）
 
 
 def _join(folder: str, name: str) -> str:
@@ -56,6 +59,10 @@ class EventWatcher:
         self._verify: Dict[str, float] = {}
         # target -> 上次真正提交扫描的时间（冷却用，防止同一目录被连续事件反复扫）
         self._last_scan: Dict[str, float] = {}
+        # 事件 id -> 连续处理失败次数（失败不写 seen，留待下轮重试，避免静默漏条）
+        self._fail_count: Dict[str, int] = {}
+        # 积压时的翻页预算：一次拉不完就下一轮加深，追平后复位
+        self._page_budget: int = HARD_MAX_PAGES
         self._warned: set[str] = set()
         self._force_next = False
 
@@ -112,6 +119,31 @@ class EventWatcher:
         self._warned.add(key)
         logger.warn(message)
 
+    def _failed(self, item: Dict[str, Any], reason: str) -> bool:
+        """处理失败：**不写 seen 记录**，留到下一轮重试。
+
+        关键点：以前这里直接 mark_event，等于把这条事件标记成"已处理"，
+        下一轮 event_seen 就跳过了 —— 一次网络抖动就变成永久漏入库，日志里
+        还看不出任何异常。现在改成重试计数，连续失败 5 轮才放弃并告警。
+        返回 True 表示"还需要重试"，调用方据此不要推进游标。
+        """
+        key = str(item.get("id") or "")
+        n = self._fail_count.get(key, 0) + 1
+        if n >= MAX_EVENT_RETRY:
+            self._fail_count.pop(key, None)
+            store.mark_event(
+                item["id"], item["type"], item["name"], item["file_id"], "", "", "", item["time"]
+            )
+            logger.error(f"[115事件] 连续 {n} 轮处理失败，放弃这条：{item['name']}（{reason}）")
+            notify.notify_error(
+                f"115 事件处理失败已放弃：{item['name']}（{reason}），可用「立即全量扫描」兜底",
+                key="events-fail",
+            )
+            return False
+        self._fail_count[key] = n
+        logger.warn(f"[115事件] 处理失败第 {n} 次，下轮重试：{item['name']}（{reason}）")
+        return True
+
     # ------------------------------------------------------------------ 单轮
     async def run_once(self, cfg: Optional[Dict[str, Any]] = None, force: bool = False) -> Dict[str, Any]:
         cfg = cfg or config.load()
@@ -138,18 +170,31 @@ class EventWatcher:
 
         limit = int(cfg_events["limit"])
         max_pages = int(cfg_events["max_pages"])
+        # 配置的页数只是"常规上限"：一旦翻满页还有更新的条目，就继续往后翻到硬上限。
+        # 否则一次大批量整理（几百个文件同时移动）会让游标直接跳过中间那些条目 =
+        # 永久漏入库，而且事后完全查不出来。
+        hard_pages = max(max_pages, HARD_MAX_PAGES, self._page_budget)
         rows: list[Dict[str, Any]] = []
+        truncated = False
         if events_on or force:
             try:
-                for page in range(max_pages):
+                page = 0
+                while page < hard_pages:
                     batch = await asyncio.to_thread(u115events.fetch, cfg, limit, page * limit)
                     if not batch:
                         break
                     rows.extend(batch)
+                    page += 1
                     if len(batch) < limit:
                         break
                     if any(not _newer(x["id"], cursor_id) for x in batch):
                         break
+                else:
+                    truncated = True
+                    logger.warn(
+                        f"[115事件] 单轮新事件超过 {hard_pages * limit} 条，只取最新部分，"
+                        "游标停在最老一条继续追，不会跳条"
+                    )
             except u115web.Web115Error as err:
                 self._warn_once(f"fetch:{err}", f"[115事件] 拉取失败：{err}")
                 notify.notify_error(f"115 操作记录拉取失败：{err}", key="events-fetch")
@@ -185,6 +230,7 @@ class EventWatcher:
         exts = tuple(cfg["scan"]["video_exts"])
         min_size = int(cfg["scan"]["min_size_mb"]) * 1024 * 1024
         handled = queued = skipped = 0
+        need_retry = False
 
         for item in fresh:
             if item["type"] in u115events.IGNORE_TYPES:
@@ -220,10 +266,8 @@ class EventWatcher:
                 try:
                     folder = await asyncio.to_thread(u115web.folder_path, cfg, item["parent_id"])
                 except u115web.Web115Error as err:
-                    logger.warn(f"[115事件] 反查目录失败（{item['name']}）：{err}")
-                    store.mark_event(
-                        item["id"], item["type"], item["name"], item["file_id"], "", "", "", item["time"]
-                    )
+                    if self._failed(item, f"反查目录失败：{err}"):
+                        need_retry = True
                     skipped += 1
                     continue
                 await asyncio.sleep(EVENT_DELAY)
@@ -255,10 +299,8 @@ class EventWatcher:
             try:
                 section = await asyncio.to_thread(plex.section_for_path, plex_path)
             except plex.PlexError as err:
-                logger.warn(f"[115事件] 获取媒体库失败：{err}")
-                store.mark_event(
-                    item["id"], item["type"], item["name"], item["file_id"], cloud_path, plex_path, "", item["time"]
-                )
+                if self._failed(item, f"Plex 取媒体库失败：{err}"):
+                    need_retry = True
                 skipped += 1
                 continue
             if not section:
@@ -266,9 +308,8 @@ class EventWatcher:
                     f"sec:{plex_path}",
                     f"[115事件] 路径不在任何 Plex 媒体库里，跳过：{plex_path}",
                 )
-                store.mark_event(
-                    item["id"], item["type"], item["name"], item["file_id"], cloud_path, plex_path, "", item["time"]
-                )
+                if self._failed(item, f"路径不在媒体库：{plex_path}"):
+                    need_retry = True
                 skipped += 1
                 continue
 
@@ -280,6 +321,7 @@ class EventWatcher:
                 skipped += 1
                 continue
 
+            self._fail_count.pop(str(item.get("id") or ""), None)
             self._add_pending(target, section, source="115event", force=force)
             store.mark_event(
                 item["id"], item["type"], item["name"], item["file_id"], cloud_path, plex_path, target, item["time"],
@@ -289,7 +331,33 @@ class EventWatcher:
             queued += 1
 
         if fresh:
-            self._save_cursor(fresh[-1])
+            if need_retry:
+                # 有事件没处理成功：游标原地不动，下一轮重拉同一窗口重试（已处理的靠
+                # event_seen 跳过）。宁可多打一次接口，也不能把这条永久漏掉。
+                logger.info("[115事件] 有事件未处理成功，游标暂不推进，下轮自动重试")
+            elif truncated:
+                # 积压超过单轮上限：游标不动，下一轮加深翻页继续往更旧的取，
+                # 直到追上游标为止 —— 全程不跳条。
+                if self._page_budget >= PAGE_BUDGET_MAX:
+                    # 已经翻到 20000 条还没追平（停机很久 + 海量整理），只能显式放弃并告警
+                    self._save_cursor(fresh[-1])
+                    self._page_budget = HARD_MAX_PAGES
+                    logger.error(
+                        f"[115事件] 积压超过 {PAGE_BUDGET_MAX * limit} 条仍未追平，"
+                        "只处理了最新部分；建议手动「立即全量扫描」补齐"
+                    )
+                    notify.notify_error(
+                        "115 事件积压过多，部分历史事件已跳过，请手动跑一次全量扫描",
+                        key="events-backlog",
+                    )
+                else:
+                    self._page_budget = min(self._page_budget * 2, PAGE_BUDGET_MAX)
+                    logger.warn(
+                        f"[115事件] 积压未追平，下轮翻页预算加深到 {self._page_budget} 页继续追"
+                    )
+            else:
+                self._save_cursor(fresh[-1])
+                self._page_budget = HARD_MAX_PAGES
 
         # 兜底：事件接口偶发空返回/漏条时，用“最近文件”补一刀
         recent_new = 0
@@ -311,6 +379,8 @@ class EventWatcher:
             "skipped": skipped,
             "recent_new": recent_new,
             "pending": len(self._pending),
+            "retry": need_retry,
+            "backlog": truncated,
             "elapsed": round(self.last_run - started, 2),
         }
         if rows:
