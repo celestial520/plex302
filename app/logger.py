@@ -19,17 +19,23 @@ def _setup() -> logging.Logger:
     global _logger
     if _logger is not None:
         return _logger
-    config.ensure_dirs()
     logger = logging.getLogger("plex302")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if not logger.handlers:
         fmt = logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s", "%Y-%m-%d %H:%M:%S")
-        fh = logging.handlers.RotatingFileHandler(
-            config.LOG_DIR / "app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-        )
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
+        # 日志目录不可写（CI runner、只读文件系统等）时只保留控制台输出。
+        # 写日志绝不能把业务主流程带崩 —— 曾经因为 mkdir('/config') 权限不足
+        # 让「测试 Cookie」的风控分支直接抛 PermissionError。
+        try:
+            config.ensure_dirs()
+            fh = logging.handlers.RotatingFileHandler(
+                config.LOG_DIR / "app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+            )
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        except OSError:
+            pass
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         logger.addHandler(sh)
@@ -38,11 +44,14 @@ def _setup() -> logging.Logger:
 
 
 def log(message: str, level: str = "INFO") -> None:
-    logger = _setup()
     line = str(message).replace("\n", " ")
     with _lock:
         _ring.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {level:<5} | {line}")
-    getattr(logger, level.lower(), logger.info)(line)
+    try:
+        logger = _setup()
+        getattr(logger, level.lower(), logger.info)(line)
+    except Exception:  # noqa: BLE001 日志失败一律吞掉，不能影响播放和接口
+        pass
 
 
 def push_external(line: str, level: str = "INFO") -> None:
