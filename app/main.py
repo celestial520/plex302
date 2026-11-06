@@ -14,13 +14,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    ai, auth, cd2, config, events, ingest, logger, notify, organize, plex, resolver,
-    scanner, scheduler, store, tmdb, u115events, u115ops, u115web, watcher, wecom,
+    auth, cd2, config, events, ingest, logger, notify, plex, resolver,
+    scanner, scheduler, store, u115events, u115ops, u115web, watcher, wecom,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -194,13 +194,6 @@ async def api_status(request: Request) -> Any:
             },
             "full": scanner.scanner.full_status(),
             "notify": {"wecom": bool(cfg["notify"]["wecom_enabled"])},
-            "organize": {
-                "enabled": bool(cfg["organize"]["enabled"]),
-                "dry_run": bool(cfg["organize"]["dry_run"]),
-                "running": organize.organizer.running,
-                "summary": organize.organizer.last_summary,
-                "history": store.organize_count(),
-            },
             "ingest": {
                 "enabled": bool(cfg["ingest"]["enabled"]),
                 "target": cfg["ingest"]["target_dir"],
@@ -544,34 +537,6 @@ async def api_115_browse(path: str = "/") -> Any:
     return _ok({"path": path, "dirs": sorted(dirs, key=lambda x: x["name"])[:300]})
 
 
-# ------------------------------------------------------- 整理
-@app.post("/api/organize/run")
-async def api_organize_run(request: Request) -> Any:
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = {}
-    dry = body.get("dry_run")
-    limit = int(body.get("limit") or 0)
-    try:
-        summary = await asyncio.to_thread(organize.organizer.run, None if dry is None else bool(dry), limit)
-    except organize.OrganizeError as err:
-        return _err(str(err))
-    except (u115web.Web115Error, tmdb.TmdbError, ai.AiError) as err:
-        return _err(str(err))
-    return _ok(summary)
-
-
-@app.get("/api/organize/status")
-async def api_organize_status() -> Any:
-    return _ok(organize.organizer.status())
-
-
-@app.get("/api/organize/history")
-async def api_organize_history(limit: int = 50) -> Any:
-    return _ok(store.organize_history(max(1, min(int(limit), 300))))
-
-
 # ------------------------------------------------------- 链接入库
 @app.post("/api/ingest")
 async def api_ingest(request: Request) -> Any:
@@ -582,7 +547,7 @@ async def api_ingest(request: Request) -> Any:
     text = str(body.get("text") or "")
     if not text.strip():
         return _err("请粘贴 115 分享链接 / 磁力 / ed2k")
-    result = await asyncio.to_thread(ingest.ingest, text, None, bool(body.get("organize", True)))
+    result = await asyncio.to_thread(ingest.ingest, text, None)
     if not result.get("ok"):
         return _err(str(result.get("error") or "入库失败"))
     return _ok(result)
@@ -610,22 +575,6 @@ async def api_wecom_callback(request: Request) -> Any:
         logger.warn(f"[微信] 消息处理失败：{err}")
         return Response(content=str(err), status_code=403, media_type="text/plain")
     return Response(content=reply, media_type="application/xml")
-
-
-@app.post("/api/tmdb/test")
-async def api_tmdb_test() -> Any:
-    try:
-        return _ok(await asyncio.to_thread(tmdb.test, config.load()))
-    except tmdb.TmdbError as err:
-        return _err(str(err))
-
-
-@app.post("/api/ai/test")
-async def api_ai_test() -> Any:
-    try:
-        return _ok(await asyncio.to_thread(ai.test, config.load()))
-    except ai.AiError as err:
-        return _err(str(err))
 
 
 # ------------------------------------------------------- 全量同步

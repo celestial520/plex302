@@ -31,6 +31,26 @@ DEFAULT_UA = (
 )
 EXPIRE_ERRNOS = {990001, 40101017, 40101019}
 
+# 115 风控节奏：CMS 默认 API 请求间隔 2.0 秒，这里取 2.05，只慢不快。
+# 后台任务（事件、入库、目录操作）全部走这个间隔；直链解析走 fast 通道（0.35 秒）
+# ——直链有 5~10 分钟目录缓存 + 30 分钟 pick_code 缓存，实际很少打 115。
+API_GAP = 2.05
+FAST_GAP = 0.35
+
+_pace_lock = threading.Lock()
+_last_call = 0.0
+
+
+def pace(fast: bool = False) -> None:
+    """所有 115 请求的统一节流闸门。"""
+    global _last_call
+    gap = FAST_GAP if fast else API_GAP
+    with _pace_lock:
+        wait = _last_call + gap - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.monotonic()
+
 
 class Web115Error(Exception):
     pass
@@ -72,7 +92,9 @@ def _get(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = 15,
     base: Optional[str] = None,
+    fast: bool = False,
 ) -> Dict[str, Any]:
+    pace(fast)
     url = (base or BASE) + path
     headers = {
         "Cookie": _cookie(cfg),
@@ -112,6 +134,7 @@ def _get_with_ua(
     timeout: int = 20,
 ) -> Dict[str, Any]:
     """和 _get 一样，但可以指定 UA —— 115 直链和请求 UA 绑定。"""
+    pace(True)
     url = BASE + path
     headers = {
         "Cookie": _cookie(cfg),
@@ -169,7 +192,7 @@ def _norm_item(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ 目录 / 直链
-DIR_TTL = 300.0
+DIR_TTL = 600.0  # 目录缓存 10 分钟：少打 115，新文件靠 force 刷新兜底
 PICK_TTL = 1800.0
 
 _dir_cache: Dict[str, Dict[str, Any]] = {}
@@ -195,7 +218,7 @@ def _cache_set(store: Dict[str, Dict[str, Any]], key: str, value: Any) -> None:
         store[key] = {"value": value, "at": time.time()}
 
 
-def list_dir(cfg: Dict[str, Any], cid: str, force: bool = False) -> List[Dict[str, Any]]:
+def list_dir(cfg: Dict[str, Any], cid: str, force: bool = False, fast: bool = False) -> List[Dict[str, Any]]:
     """列一个目录（cid 必须是字符串）。"""
     cid = str(cid or "0")
     if not force:
@@ -212,6 +235,7 @@ def list_dir(cfg: Dict[str, Any], cid: str, force: bool = False) -> List[Dict[st
                 "aid": 1, "cid": cid, "show_dir": 1, "limit": 1000, "offset": offset,
                 "o": "user_ptime", "asc": 0, "natsort": 1, "fc_mix": 0, "format": "json",
             },
+            fast=fast,
         )
         data = payload.get("data")
         if isinstance(data, dict):
@@ -239,14 +263,36 @@ def _match(items: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
-    """云盘绝对路径 -> {pick_code, name, size}。
+# 同一路径只让一个线程去解析，避免 Plex 起播时并发请求把同一个目录连打好几次
+_resolve_locks: Dict[str, threading.Lock] = {}
+_resolve_locks_guard = threading.Lock()
 
-    逐级列目录比“按文件名搜索”可靠：115 允许同名文件存在不同目录。
-    """
+
+def _resolve_lock(key: str) -> threading.Lock:
+    with _resolve_locks_guard:
+        if len(_resolve_locks) > 5000:
+            _resolve_locks.clear()
+        return _resolve_locks.setdefault(key, threading.Lock())
+
+
+def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
+    """云盘绝对路径 -> {pick_code, name, size}（同一路径并发只解析一次）。"""
     path = "/" + str(cloud_path or "").strip("/")
     if path == "/":
         raise Web115Error("路径为空")
+    cached = _cache_get(_pick_cache, path, PICK_TTL)
+    if cached is not None:
+        return cached
+    lock = _resolve_lock(path)
+    if not lock.acquire(timeout=20):
+        raise Web115Error("115 目录解析排队超时，稍后重试")
+    try:
+        return _resolve_file_locked(cfg, path)
+    finally:
+        lock.release()
+
+
+def _resolve_file_locked(cfg: Dict[str, Any], path: str) -> Dict[str, Any]:
     cached = _cache_get(_pick_cache, path, PICK_TTL)
     if cached is not None:
         return cached
@@ -255,11 +301,11 @@ def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
     cid = "0"
     node: Optional[Dict[str, Any]] = None
     for index, part in enumerate(parts):
-        items = list_dir(cfg, cid)
+        items = list_dir(cfg, cid, fast=True)
         node = _match(items, part)
         if node is None:
             # 目录里东西太多时试一次强制刷新，避免缓存里是旧的
-            items = list_dir(cfg, cid, force=True)
+            items = list_dir(cfg, cid, force=True, fast=True)
             node = _match(items, part)
         if node is None:
             raise Web115Error(f"115 里找不到路径：{'/' + '/'.join(parts[: index + 1])}")

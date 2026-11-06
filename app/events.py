@@ -25,7 +25,7 @@ VIDEOISH_DIR_TYPES = {17, 18, 20}
 
 # 115 对高频接口调用比较敏感（风控会返回 405/403），
 # 反查目录路径是按目录缓存的，这里再给每条新事件加一点间隔。
-EVENT_DELAY = 0.6
+EVENT_DELAY = 2.05  # 和 CMS 的 2 秒对齐：反查目录是 115 最敏感的接口
 
 
 def _join(folder: str, name: str) -> str:
