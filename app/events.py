@@ -53,6 +53,8 @@ class EventWatcher:
         self._pending: Dict[str, Dict[str, Any]] = {}
         # target -> due_at（扫完复核）
         self._verify: Dict[str, float] = {}
+        # target -> 上次真正提交扫描的时间（冷却用，防止同一目录被连续事件反复扫）
+        self._last_scan: Dict[str, float] = {}
         self._warned: set[str] = set()
         self._force_next = False
 
@@ -369,11 +371,20 @@ class EventWatcher:
         max_wait = int(cfg["events"]["max_wait_seconds"])
         item = self._pending.get(target)
         if item:
-            item["ready_at"] = min(now + settle, item["first_at"] + max_wait)
+            ready = min(now + settle, item["first_at"] + max_wait)
+        else:
+            ready = min(now + settle, now + max_wait)
+        # 冷却：同一目录刚扫过就不再扫，避免一批事件把同一个目录反复打
+        cooldown = int(cfg["events"].get("cooldown_seconds") or 0)
+        last = self._last_scan.get(target, 0)
+        if cooldown > 0 and last:
+            ready = max(ready, last + cooldown)
+        if item:
+            item["ready_at"] = ready
             item["section"] = section
             return
         self._pending[target] = {
-            "ready_at": min(now + settle, now + max_wait),
+            "ready_at": ready,
             "first_at": now,
             "section": section,
             "source": source,
@@ -391,6 +402,7 @@ class EventWatcher:
                 target, section.get("key"), source=info["source"], force=bool(info.get("force"))
             )
             if result.get("queued"):
+                self._last_scan[target] = now
                 cfg = config.load()
                 if cfg["events"].get("verify_enabled"):
                     self._verify[target] = time.time() + int(cfg["events"]["verify_delay"])
@@ -399,6 +411,9 @@ class EventWatcher:
             else:
                 logger.warn(f"[115事件] 入队失败 {target}：{result.get('error')}")
                 notify.notify_error(f"扫描入队失败：{result.get('error')}", key="enqueue")
+        if len(self._last_scan) > 5000:  # 只是冷却记录，过期就丢，别无限涨
+            cutoff = now - 3600
+            self._last_scan = {k: v for k, v in self._last_scan.items() if v >= cutoff}
 
     async def _run_verify(self) -> None:
         now = time.time()

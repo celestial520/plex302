@@ -120,6 +120,7 @@ DEFAULTS: dict[str, Any] = {
         "max_wait_seconds": 600, # 单目录最长等待，避免一直有事件时永远不扫
         "verify_enabled": True,  # 扫完再复核一次，接住“扫的时候还没写完”
         "verify_delay": 180,     # 复核延迟（秒）
+        "cooldown_seconds": 120, # 同一目录两次扫描的最小间隔（防事件风暴）
         "recent_fallback": True, # 同时检查“最近文件”，兜住事件接口偶发空返回
     },
     "notify": {
@@ -330,6 +331,7 @@ def normalize(cfg: dict) -> dict:
     events["max_wait_seconds"] = _as_int(events.get("max_wait_seconds"), 600, 60, 7200)
     events["verify_enabled"] = _as_bool(events.get("verify_enabled"), True)
     events["verify_delay"] = _as_int(events.get("verify_delay"), 180, 30, 3600)
+    events["cooldown_seconds"] = _as_int(events.get("cooldown_seconds"), 120, 0, 3600)
     events["recent_fallback"] = _as_bool(events.get("recent_fallback"), True)
 
     notify = cfg["notify"]
