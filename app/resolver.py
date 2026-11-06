@@ -270,7 +270,7 @@ class Resolver:
         cache_key = f"{cfg['provider']['type']}|{cloud_path}|{hashlib.sha1(ua_for_cache.encode('utf-8', 'ignore')).hexdigest()}"
         cached = self.url_cache.get(cache_key)
         if cached:
-            store.bump_stat("redirect")
+            # 302 次数统一由 nginx 302.log 统计（含 nginx 缓存命中），这里不再重复计数
             return self._redirect(cached, "cache", cloud_path, cache_key)
 
         # 单飞：Plex 起播会并发打同一个 part，只让第一个请求真的去取直链
@@ -284,7 +284,6 @@ class Resolver:
         async with lock:
             cached = self.url_cache.get(cache_key)
             if cached:
-                store.bump_stat("redirect")
                 return self._redirect(cached, "cache-wait", cloud_path, cache_key)
 
             try:
@@ -302,11 +301,10 @@ class Resolver:
                 # 这里不再二次扣减，两层缓存一起过期、一起只刷新一次。
                 ttl = max(30, min(ttl, link.expires_in))
             self.url_cache.set(cache_key, link.url, ttl)
-            store.bump_stat("redirect")
             if cfg["advanced"].get("log_redirects"):
                 safe = self._safe_url(link.url)
                 logger.info(
-                    f"[302] {ip or '-'} | {link.provider} | {cloud_path} -> {safe} | "
+                    f"[直链] {ip or '-'} | {link.provider} | {cloud_path} -> {safe} | "
                     f"缓存 {ttl}s | {ua[:60]}"
                 )
             return self._redirect(link.url, "ok", cloud_path, cache_key)

@@ -20,7 +20,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -43,7 +43,9 @@ async def lifespan(app: FastAPI):
     await scheduler.scheduler.start()
     notify_task = asyncio.create_task(notify.flush_loop(), name="notify-flush")
     index_task = asyncio.create_task(_auto_index(), name="auto-index")
+    log_task = asyncio.create_task(_tail_302_log(), name="302-log")
     yield
+    log_task.cancel()
     index_task.cancel()
     notify_task.cancel()
     await scheduler.scheduler.stop()
@@ -71,6 +73,63 @@ async def _auto_index() -> None:
         await indexer.index_builder.start(force=False)
     except Exception as err:  # noqa: BLE001 索引失败绝不能影响服务启动
         logger.warn(f"[索引] 自动构建跳过：{err}")
+
+
+NGINX_302_LOG = Path("/var/log/nginx/302.log")
+
+
+async def _tail_302_log() -> None:
+    """把 nginx 的 302 决策日志搬进 WebUI 日志页，并统一「今日 302」统计口径。
+
+    v1.7 把缓存上移到 nginx 后，命中缓存的 302 不再经过 Python，
+    WebUI 日志页看不到、统计也会漏。这里每 2 秒读一次 302.log 的新增行，
+    只挑 302 / 回源决策推进环形缓冲。统计改由这里统一计数，
+    避免和 resolver 里的 Python 侧计数重复。
+    """
+    # 从当前文件末尾开始：容器重启后 302.log 还在（挂在 ./log），
+    # 从头读会把历史日志重复灌进日志页、重复累加统计。
+    try:
+        offset = NGINX_302_LOG.stat().st_size
+    except OSError:
+        offset = 0
+    while True:
+        try:
+            await asyncio.sleep(2)
+            try:
+                size = NGINX_302_LOG.stat().st_size
+            except OSError:
+                continue
+            if size < offset:  # 日志被清空或轮转
+                offset = 0
+            if size <= offset:
+                continue
+            with NGINX_302_LOG.open("rb") as fh:
+                fh.seek(offset)
+                chunk = fh.read(min(size - offset, 256 * 1024))
+                end = fh.tell()
+            # 只处理完整行，半行留到下一轮，避免把一条日志拆成两条
+            if not chunk.endswith(b"\n"):
+                cut = chunk.rfind(b"\n")
+                if cut < 0:
+                    continue
+                chunk = chunk[:cut + 1]
+                end = offset + cut + 1
+            offset = end
+            for raw in chunk.decode("utf-8", "ignore").splitlines():
+                parts = raw.split("|", 5)
+                if len(parts) < 6:
+                    continue
+                _, ip, status, action, reason, uri = parts
+                if action not in ("redirect", "proxy"):
+                    continue
+                tag = "302" if action == "redirect" else "回源"
+                logger.push_external(f"[{tag}] {ip} | {status} | {reason or '-'} | {uri}")
+                if action == "redirect":
+                    store.bump_stat("redirect")
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 读日志失败绝不能影响服务
+            logger.warn(f"[日志] 读取 302.log 失败：{err}")
 
 
 app = FastAPI(title="Plex302", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)

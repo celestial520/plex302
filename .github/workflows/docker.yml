@@ -234,6 +234,19 @@ jobs:
           echo "后续 5 次命中 nginx 缓存=$hit"
           [ "$hit" = "5" ] || { echo "::error::302 没有被 nginx 共享内存缓存命中"; cat h2.txt; exit 1; }
 
+          echo "--- 302 决策日志（含 nginx 缓存命中，每次都要可见） ---"
+          sleep 3
+          docker logs p302 2>&1 | grep -F '[Plex302] action=redirect' > /dev/null \
+            || { echo "::error::docker logs 里没有 302 决策日志"; exit 1; }
+          docker logs p302 2>&1 | grep -F 'reason=nginx-cache' > /dev/null \
+            || { echo "::error::缓存命中的 302 没有写日志"; exit 1; }
+          n=$(docker exec p302 sh -c 'grep -c "|redirect|" /var/log/nginx/302.log' || true)
+          echo "302.log 决策行数=$n"
+          [ "${n:-0}" -ge 6 ] || { echo "::error::302.log 缺少结构化决策行"; exit 1; }
+          curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/logs?lines=400' | grep -F '[302]' > /dev/null \
+            || { echo "::error::WebUI 日志页没有 302 记录"; exit 1; }
+          echo "302 日志 OK"
+
           echo "--- metadata 原生透传（不改写 Plex 响应） ---"
           curl -s -m 10 -H 'X-Forwarded-For: 8.8.8.8' -H 'X-Plex-Token: mock' \
             'http://127.0.0.1:32500/library/metadata/9' -o meta.json

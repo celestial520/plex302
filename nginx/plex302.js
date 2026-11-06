@@ -162,6 +162,27 @@ function copyHeaders(from, to) {
     }
 }
 
+// ------------------------------------------------------------ 决策日志
+// 对齐 plex-demo：它的 redirect() 每次 302 都 r.warn("[重定向] : " + url)，
+// 所以缓存命中也能在 docker logs 里看到。我们额外带上 action/reason/ip/uri，
+// 并把直链脱敏（带签名的完整 URL 不写进日志）。
+// 日志失败绝不影响播放，整段包在 try 里。
+function safeLink(url) {
+    try {
+        const m = String(url || '').match(/^([a-z]+:\/\/[^/]+)(\/[^?]*)/i);
+        if (m) return m[1] + (m[2].length > 48 ? m[2].slice(0, 48) + '…' : m[2]);
+    } catch (e) { /* ignore */ }
+    return String(url || '').slice(0, 60);
+}
+
+function logDecision(r, action, reason, url) {
+    try {
+        r.warn('[Plex302] action=' + action + ' reason=' + (reason || '-')
+            + ' ip=' + clientIp(r) + ' uri=' + r.uri
+            + (url ? ' -> ' + safeLink(url) : ''));
+    } catch (e) { /* 日志失败不能影响播放 */ }
+}
+
 // ------------------------------------------------------------ 播放：302
 async function redirect2Pan(r) {
     reloadRuntime();
@@ -174,6 +195,7 @@ async function redirect2Pan(r) {
     if (isStart && String(args['directPlay'] ? args['directPlay'][0] : '') === '0') {
         r.headersOut['X-Plex302'] = 'proxy';
         r.headersOut['X-Plex302-Reason'] = 'client requested transcode';
+        logDecision(r, 'proxy', 'client requested transcode');
         proxyToPlex(r);
         return;
     }
@@ -185,6 +207,7 @@ async function redirect2Pan(r) {
     if (hit) {
         r.headersOut['X-Plex302'] = 'redirect';
         r.headersOut['X-Plex302-Reason'] = 'nginx-cache';
+        logDecision(r, 'redirect', 'nginx-cache', hit);
         r.return(302, hit);
         return;
     }
@@ -208,6 +231,7 @@ async function redirect2Pan(r) {
         routeSet(key, decision.url, ttl);
         r.headersOut['X-Plex302'] = 'redirect';
         r.headersOut['X-Plex302-Reason'] = decision.reason || 'ok';
+        logDecision(r, 'redirect', decision.reason || 'ok', decision.url);
         // 客户端缓存时间不超过直链剩余寿命，避免拿着过期直链拖动进度条
         const clientMax = Math.min(3600, Math.max(0, ttl - 300));
         if (clientMax > 0) r.headersOut['Cache-Control'] = 'max-age=' + clientMax;
@@ -218,6 +242,7 @@ async function redirect2Pan(r) {
     // 3) fallbackUseOriginal：任何失败一律回源 Plex，绝不把 500 甩给播放器
     r.headersOut['X-Plex302'] = 'proxy';
     if (decision && decision.reason) r.headersOut['X-Plex302-Reason'] = decision.reason;
+    logDecision(r, 'proxy', (decision && decision.reason) || 'fallback');
     proxyToPlex(r);
 }
 

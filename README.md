@@ -10,6 +10,33 @@ Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 str
 
 ---
 
+## v1.7.1 更新
+
+> 修复 v1.7.0 的一个可观测性回退：**302 成功后日志现在每次都会显示**，和 plex-demo 一致。
+
+v1.7.0 把 302 直链缓存搬到 nginx 共享内存后，缓存命中的 302 不再经过 Python 后端，导致 WebUI「日志」页看不到、概览的「今日 302」也漏计 —— 只有首次真正向 115 取直链那一次有日志。plex-demo 是每次 302 都 `r.warn("[重定向]")` 的，这里补齐。
+
+| 变化 | 说明 |
+|---|---|
+| **每次 302 都写日志** | njs 在「命中缓存 / 新解析 / 回源」三个分支都输出 `[Plex302] action=... reason=... ip=... uri=...`，走 nginx `warn` 级别，直链已脱敏 |
+| **docker logs 直接可见** | `error_log stderr warn`，`docker logs -f plex302 \| grep Plex302` 即可，和 plex-demo 用 `grep js:` 看日志的习惯一致 |
+| **WebUI 日志页自动显示** | 后台每 2 秒读 `./log/302.log` 的新增行推进环形缓冲，无需改前端、不额外发请求给后端 |
+| **结构化落盘** | `./log/302.log` 格式 `时间\|IP\|状态\|动作\|原因\|原始URI`，可直接 grep；`./log/error.log` 保留 njs 明细 |
+| **统计口径统一** | 「今日 302」改由 nginx 日志统一计数，含缓存命中；Python 侧不再重复计。首次取直链的日志前缀改为 `[直链]`，与每次请求的 `[302]` 区分 |
+| **日志开关** | `config.json` 的 `advanced.log_redirects`（默认 `true`）只控制 Python 侧 `[直链]` 明细；nginx 层的 302 决策日志恒定记录，不因开关丢失 |
+
+日志长这样：
+
+```
+14:55:03 | INFO  | [直链] 8.8.8.8 | 115web | /电影/沙丘2.mkv -> https://cdn.115.com/... | 缓存 21599s | PlexWeb
+14:55:03 | INFO  | [302] 8.8.8.8 | 302 | ok | /library/parts/123/1/沙丘2.mkv
+14:56:11 | INFO  | [302] 8.8.8.8 | 302 | nginx-cache | /library/parts/123/1/沙丘2.mkv
+```
+
+从 1.7.0 升级：无配置变化，直接换镜像。浏览器开发者工具里仍可用响应头 `X-Plex302: redirect` / `X-Plex302-Reason: nginx-cache` 交叉验证。
+
+---
+
 ## v1.7.0 更新
 
 > 拦截和播放对齐 [plex-demo](https://github.com/bpking1/embyExternalUrl) 的架构：**302 直链缓存搬到 nginx 共享内存**，命中即 302，连后端都不问。唯一保留的差异还是那一个 —— 它用 115 开放平台，我们用 Cookie。

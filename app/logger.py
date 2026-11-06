@@ -45,6 +45,16 @@ def log(message: str, level: str = "INFO") -> None:
     getattr(logger, level.lower(), logger.info)(line)
 
 
+def push_external(line: str, level: str = "INFO") -> None:
+    """把外部组件（nginx 302 决策日志）产生的行只推进 WebUI 环形缓冲。
+
+    不写 app.log：nginx 自己已经落盘到 /var/log/nginx/302.log 和 error.log，
+    再写一份只会重复、还会让日志文件翻倍。
+    """
+    with _lock:
+        _ring.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {level:<5} | {str(line).replace(chr(10), ' ')}")
+
+
 def info(message: str) -> None:
     log(message, "INFO")
 
