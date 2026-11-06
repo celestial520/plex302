@@ -92,6 +92,10 @@ def _find_path(cid: str):
         if cur == target:
             return [{"cid": "0", "name": ""}] + trail
         for item in STATE["tree"].get(cur, []):
+            # 真实 115 的文件项也带 cid（父目录 id），只有 fid 为空的才是子目录；
+            # 否则会自引用导致死循环。
+            if item.get("fid"):
+                continue
             sub = str(item.get("cid") or "")
             if sub:
                 stack.append((sub, trail + [{"cid": sub, "name": item["n"]}]))

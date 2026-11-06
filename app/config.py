@@ -132,7 +132,7 @@ DEFAULTS: dict[str, Any] = {
     "advanced": {
         "force_direct_play": True,
         "part_cache_ttl": 86400,
-        "url_cache_ttl": 1800,
+        "url_cache_ttl": 21600,
         "log_redirects": True,
     },
 }
@@ -333,7 +333,7 @@ def normalize(cfg: dict) -> dict:
     adv = cfg["advanced"]
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
     adv["part_cache_ttl"] = _as_int(adv.get("part_cache_ttl"), 86400, 60, 30 * 86400)
-    adv["url_cache_ttl"] = _as_int(adv.get("url_cache_ttl"), 1800, 30, 86400)
+    adv["url_cache_ttl"] = _as_int(adv.get("url_cache_ttl"), 21600, 300, 86400)
     adv["log_redirects"] = _as_bool(adv.get("log_redirects"), True)
 
     # 未知字段直接丢弃，避免前端误传导致配置文件越来越大

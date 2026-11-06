@@ -15,14 +15,16 @@ Cookie 失效时 115 会返回 HTTP 405，这里统一转成可读错误。
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from . import config, logger
+from . import config, logger, store
 
 BASE = os.getenv("P115_WEBAPI_BASE", "https://webapi.115.com").rstrip("/")
 DEFAULT_UA = (
@@ -54,6 +56,14 @@ def pace(fast: bool = False) -> None:
 
 class Web115Error(Exception):
     pass
+
+
+def _count_call(n: int = 1) -> None:
+    """按天累计真正发出去的 115 请求，概览里能直接核对。"""
+    try:
+        store.bump_115_call(n)
+    except Exception:  # noqa: BLE001 统计失败不能影响播放
+        pass
 
 
 _path_cache: Dict[str, Dict[str, Any]] = {}
@@ -95,6 +105,7 @@ def _get(
     fast: bool = False,
 ) -> Dict[str, Any]:
     pace(fast)
+    _count_call()
     url = (base or BASE) + path
     headers = {
         "Cookie": _cookie(cfg),
@@ -135,6 +146,7 @@ def _get_with_ua(
 ) -> Dict[str, Any]:
     """和 _get 一样，但可以指定 UA —— 115 直链和请求 UA 绑定。"""
     pace(True)
+    _count_call()
     url = BASE + path
     headers = {
         "Cookie": _cookie(cfg),
@@ -194,28 +206,29 @@ def _norm_item(raw: Dict[str, Any]) -> Dict[str, Any]:
 # ------------------------------------------------------------------ 目录 / 直链
 DIR_TTL = 600.0  # 目录缓存 10 分钟：少打 115，新文件靠 force 刷新兜底
 PICK_TTL = 1800.0
+INDEX_TTL = 7 * 86400.0  # 播放索引（路径 -> pick_code）有效期，命中失败会自动重建
 
 _dir_cache: Dict[str, Dict[str, Any]] = {}
 _pick_cache: Dict[str, Dict[str, Any]] = {}
 _cache_lock = threading.Lock()
 
 
-def _cache_get(store: Dict[str, Dict[str, Any]], key: str, ttl: float) -> Optional[Any]:
+def _cache_get(bucket: Dict[str, Dict[str, Any]], key: str, ttl: float) -> Optional[Any]:
     now = time.time()
     with _cache_lock:
-        item = store.get(key)
+        item = bucket.get(key)
         if item and now - item["at"] < ttl:
             return item["value"]
         if item:
-            store.pop(key, None)
+            bucket.pop(key, None)
     return None
 
 
-def _cache_set(store: Dict[str, Dict[str, Any]], key: str, value: Any) -> None:
+def _cache_set(bucket: Dict[str, Dict[str, Any]], key: str, value: Any) -> None:
     with _cache_lock:
-        if len(store) > 20000:
-            store.clear()
-        store[key] = {"value": value, "at": time.time()}
+        if len(bucket) > 20000:
+            bucket.clear()
+        bucket[key] = {"value": value, "at": time.time()}
 
 
 def list_dir(cfg: Dict[str, Any], cid: str, force: bool = False, fast: bool = False) -> List[Dict[str, Any]]:
@@ -263,6 +276,27 @@ def _match(items: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def is_dir_item(item: Dict[str, Any]) -> bool:
+    """判断 /files 返回项是目录还是文件。
+
+    真实 115 的**文件项也带 cid**（那是父目录 id），只看 cid 会把视频当成
+    子目录递归，播放索引一条都写不进去。目录项的特征是：有自身 cid、
+    没有 fid、没有 pick_code。
+    """
+    explicit = _pick(item, "is_dir", "is_folder", default=None)
+    if explicit is not None and str(explicit).lower() in ("1", "true", "yes"):
+        return True
+    fid = str(_pick(item, "fid", "file_id", default="") or "")
+    pc = str(_pick(item, "pc", "pick_code", "pickcode", default="") or "")
+    cid = str(_pick(item, "cid", "id", default="") or "")
+    return bool(cid) and not fid and not pc
+
+
+def dir_cid(item: Dict[str, Any]) -> str:
+    """目录项的自身 cid（文件项的 cid 是父目录，别拿它当子目录）。"""
+    return str(_pick(item, "cid", "id", default="") or "")
+
+
 # 同一路径只让一个线程去解析，避免 Plex 起播时并发请求把同一个目录连打好几次
 _resolve_locks: Dict[str, threading.Lock] = {}
 _resolve_locks_guard = threading.Lock()
@@ -276,7 +310,13 @@ def _resolve_lock(key: str) -> threading.Lock:
 
 
 def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
-    """云盘绝对路径 -> {pick_code, name, size}（同一路径并发只解析一次）。"""
+    """云盘绝对路径 -> {pick_code, name, size}（同一路径并发只解析一次）。
+
+    查找顺序（越靠前越省 115 请求）：
+      1. 进程内缓存
+      2. SQLite 播放索引（起播命中 = 0 次列目录，只剩 1 次 /files/download）
+      3. 逐级列目录（只有从没播过、也没被事件索引过的新路径才走这里）
+    """
     path = "/" + str(cloud_path or "").strip("/")
     if path == "/":
         raise Web115Error("路径为空")
@@ -292,10 +332,39 @@ def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
         lock.release()
 
 
+def _index_lookup(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        row = store.index_get(path)
+    except Exception:  # noqa: BLE001 索引坏了不能挡住播放
+        return None
+    if not row:
+        return None
+    if time.time() - float(row.get("updated_at") or 0) > INDEX_TTL:
+        return None
+    return {
+        "pick_code": str(row["pick_code"]),
+        "name": str(row.get("name") or ""),
+        "size": int(row.get("size") or 0),
+        "hit": "index",
+    }
+
+
+def _index_save(path: str, info: Dict[str, Any], cid: str = "") -> None:
+    try:
+        store.index_put(path, info["pick_code"], info.get("size") or 0, info.get("name") or "", cid)
+    except Exception as err:  # noqa: BLE001
+        logger.warn(f"[115] 写播放索引失败：{err}")
+
+
 def _resolve_file_locked(cfg: Dict[str, Any], path: str) -> Dict[str, Any]:
     cached = _cache_get(_pick_cache, path, PICK_TTL)
     if cached is not None:
         return cached
+
+    indexed = _index_lookup(path)
+    if indexed is not None:
+        _cache_set(_pick_cache, path, indexed)
+        return indexed
 
     parts = [p for p in path.strip("/").split("/") if p]
     cid = "0"
@@ -310,7 +379,9 @@ def _resolve_file_locked(cfg: Dict[str, Any], path: str) -> Dict[str, Any]:
         if node is None:
             raise Web115Error(f"115 里找不到路径：{'/' + '/'.join(parts[: index + 1])}")
         if index < len(parts) - 1:
-            sub = str(_pick(node, "cid", "id", default=""))
+            if not is_dir_item(node):
+                raise Web115Error(f"{part} 不是目录")
+            sub = dir_cid(node)
             if not sub:
                 raise Web115Error(f"{part} 不是目录")
             cid = sub
@@ -324,8 +395,10 @@ def _resolve_file_locked(cfg: Dict[str, Any], path: str) -> Dict[str, Any]:
         "pick_code": pc,
         "name": str(_pick(node, "n", "file_name", "name")),
         "size": int(_pick(node, "s", "file_size", "size", default=0) or 0),
+        "hit": "walk",
     }
     _cache_set(_pick_cache, path, info)
+    _index_save(path, info, cid)
     return info
 
 
@@ -351,16 +424,158 @@ def download_url(cfg: Dict[str, Any], pick_code: str, ua: str = "") -> str:
     return url
 
 
+# ------------------------------------------------------------------ 直链缓存
+# 115 直链带 t=<过期时间戳>，按它算缓存寿命；读不到就给 6 小时。
+# 不能只给 30 分钟：一部电影播到 29 分钟缓存过期，Plex 重新请求就又去打 115，
+# 这正是「连续播放 30 分钟出现多次连接」的第二个原因。
+# 缓存键 = pick_code + UA 指纹：同一部片在同一次播放里反复请求（拖动、重连、
+# Plex 并发探测）全部命中缓存，不会再去打 115。
+URL_TTL_DEFAULT = 6 * 3600.0
+URL_TTL_MAX = 6 * 3600.0
+URL_TTL_MIN = 300.0
+
+_url_cache: Dict[str, Dict[str, Any]] = {}
+_url_locks: Dict[str, threading.Lock] = {}
+_url_locks_guard = threading.Lock()
+
+
+def _ua_key(ua: str) -> str:
+    return hashlib.sha1((ua or "").encode("utf-8", "ignore")).hexdigest()[:12]
+
+
+def _url_key(pick_code: str, ua: str) -> str:
+    return f"{pick_code}|{_ua_key(ua)}"
+
+
+def _url_lock(key: str) -> threading.Lock:
+    with _url_locks_guard:
+        if len(_url_locks) > 20000:
+            _url_locks.clear()
+        return _url_locks.setdefault(key, threading.Lock())
+
+
+def _expiry_from_url(url: str) -> float:
+    """从直链里读真实过期时间（115 用 t=<秒级时间戳>），读不到返回 0。"""
+    try:
+        query = parse_qs(urlsplit(url).query)
+    except ValueError:
+        return 0.0
+    for name in ("t", "expire", "expires", "deadline"):
+        values = query.get(name)
+        if not values:
+            continue
+        try:
+            ts = float(values[0])
+        except (TypeError, ValueError):
+            continue
+        if ts > 1e12:  # 毫秒时间戳
+            ts /= 1000.0
+        if ts > time.time():
+            return ts
+    return 0.0
+
+
+def _url_ttl(url: str) -> float:
+    expire_at = _expiry_from_url(url)
+    if not expire_at:
+        return URL_TTL_DEFAULT
+    ttl = expire_at - time.time() - 60  # 留 1 分钟余量，别把刚好过期的链接发出去
+    return max(URL_TTL_MIN, min(URL_TTL_MAX, ttl))
+
+
+def url_for_pick(cfg: Dict[str, Any], pick_code: str, ua: str = "", force: bool = False) -> str:
+    """pick_code -> 直链，带缓存 + 单飞：并发请求只会有一次真的打 115。"""
+    key = _url_key(pick_code, ua)
+    if not force:
+        cached = _cache_get_url(key)
+        if cached:
+            return cached
+    lock = _url_lock(key)
+    if not lock.acquire(timeout=20):
+        raise Web115Error("115 直链解析排队超时，稍后重试")
+    try:
+        if not force:
+            # 抢到锁后再看一次：可能别的线程刚刚取回来了
+            cached = _cache_get_url(key)
+            if cached:
+                return cached
+        url = download_url(cfg, pick_code, ua)
+        ttl = _url_ttl(url)
+        with _cache_lock:
+            if len(_url_cache) > 20000:
+                _url_cache.clear()
+            _url_cache[key] = {"value": url, "at": time.time(), "expire_at": time.time() + ttl}
+        return url
+    finally:
+        lock.release()
+
+
+def _cache_get_url(key: str) -> str:
+    with _cache_lock:
+        item = _url_cache.get(key)
+        if not item:
+            return ""
+        if float(item.get("expire_at") or 0) <= time.time():
+            _url_cache.pop(key, None)
+            return ""
+        return str(item["value"])
+
+
+def url_ttl_remaining(pick_code: str, ua: str) -> int:
+    """这条直链在本进程缓存里还剩多少秒可用。
+
+    给 resolver 的 302 缓存用：两层缓存同生共死，不会一层还热着、另一层
+    已经过期导致重复去打 115。
+    """
+    with _cache_lock:
+        item = _url_cache.get(_url_key(pick_code, ua))
+        if not item:
+            return 0
+        return max(0, int(float(item.get("expire_at") or 0) - time.time()))
+
+
+def clear_url_cache(pick_code: str = "") -> None:
+    with _cache_lock:
+        if not pick_code:
+            _url_cache.clear()
+            return
+        for key in [k for k in _url_cache if k.split("|", 1)[0] == pick_code]:
+            _url_cache.pop(key, None)
+
+
 def file_url_by_path(cfg: Dict[str, Any], cloud_path: str, ua: str = "") -> Dict[str, Any]:
-    """云盘路径 -> 直链（Cookie 模式，替代原来的开放平台接口）。"""
+    """云盘路径 -> 直链（Cookie 模式，替代原来的开放平台接口）。
+
+    命中播放索引时只发 1 个请求（/files/download）；索引里的 pick_code 失效时
+    自动丢掉索引、重新解析一次，避免一次改名导致这个文件永远播不了。
+    """
     info = resolve_file(cfg, cloud_path)
-    url = download_url(cfg, info["pick_code"], ua)
-    return {"url": url, "name": info["name"], "pick_code": info["pick_code"]}
+    try:
+        url = url_for_pick(cfg, info["pick_code"], ua)
+    except Web115Error:
+        if info.get("hit") != "index":
+            raise
+        path = "/" + str(cloud_path or "").strip("/")
+        logger.warn(f"[115] 索引里的 pick_code 已失效，重建：{path}")
+        store.index_delete(path)
+        with _cache_lock:
+            _pick_cache.pop(path, None)
+            _url_cache.pop(_url_key(info["pick_code"], ua), None)
+        info = resolve_file(cfg, cloud_path)
+        url = url_for_pick(cfg, info["pick_code"], ua, force=True)
+    return {
+        "url": url,
+        "name": info["name"],
+        "pick_code": info["pick_code"],
+        "hit": info.get("hit", ""),
+        "expires_in": url_ttl_remaining(info["pick_code"], ua),
+    }
 
 
 def clear_file_cache() -> None:
     with _cache_lock:
         _pick_cache.clear()
+        _url_cache.clear()
 
 
 def recent(cfg: Dict[str, Any], limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:

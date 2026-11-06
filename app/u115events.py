@@ -52,6 +52,7 @@ TYPE_LABELS: Dict[int, str] = {
 IGNORE_TYPES = {3, 4, 7, 8, 9, 10, 19}
 # 目录类事件：扫描目录本身（而不是它所在的父目录）
 DIR_EVENT_TYPES = {17, 18, 20}
+TYPE_DELETE = 22
 
 
 def _as_int(value: Any, default: int = 0) -> int:

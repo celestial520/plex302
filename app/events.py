@@ -223,6 +223,14 @@ class EventWatcher:
                     continue
                 await asyncio.sleep(EVENT_DELAY)
             cloud_path = _join(folder, item["name"])
+            # 事件本身就带 pick_code：顺手写进播放索引，之后起播只打 1 次 115。
+            # 这一步不额外发请求，纯白嫖事件里的数据。
+            if item.get("pick_code") and not item["is_dir"]:
+                store.index_put(
+                    cloud_path, item["pick_code"], item["size"], item["name"], item.get("parent_id") or ""
+                )
+            if item["type"] == u115events.TYPE_DELETE:
+                store.index_delete(cloud_path)
             plex_path = resolver.resolver.map_plex_path(cfg, cloud_path) or ""
             if not plex_path:
                 self._warn_once(

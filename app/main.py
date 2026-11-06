@@ -14,13 +14,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, cd2, config, events, ingest, logger, notify, plex, resolver,
+    auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
     scanner, scheduler, store, u115events, u115ops, u115web, watcher, wecom,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -42,13 +42,35 @@ async def lifespan(app: FastAPI):
     await events.event_watcher.start()
     await scheduler.scheduler.start()
     notify_task = asyncio.create_task(notify.flush_loop(), name="notify-flush")
+    index_task = asyncio.create_task(_auto_index(), name="auto-index")
     yield
+    index_task.cancel()
     notify_task.cancel()
     await scheduler.scheduler.stop()
     await events.event_watcher.stop()
     await watcher.watcher.stop()
     await scanner.scanner.stop()
     logger.info("Plex302 已停止")
+
+
+async def _auto_index() -> None:
+    """首次启动后台建一次「路径 -> pick_code」索引。
+
+    相当于 TgtoDrive 整理时把 pickcode 写进 STRM：不建索引的话，第一次起播
+    还得逐级列目录，一部片就是 3~4 个 115 请求。建好后起播只剩 1 次取直链。
+    只在有 Cookie、有挂载、索引为空时跑；全程走 2.05 秒闸门，可随时在 WebUI 停。
+    """
+    if os.getenv("PLEX302_AUTO_INDEX", "1") == "0":
+        return
+    await asyncio.sleep(30)
+    try:
+        cfg = config.load()
+        if not u115web.has_cookie(cfg) or not cfg.get("mounts") or store.index_count():
+            return
+        logger.info("[索引] 首次启动，后台建立 115 播放索引（路径 → pick_code）")
+        await indexer.index_builder.start(force=False)
+    except Exception as err:  # noqa: BLE001 索引失败绝不能影响服务启动
+        logger.warn(f"[索引] 自动构建跳过：{err}")
 
 
 app = FastAPI(title="Plex302", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -199,6 +221,15 @@ async def api_status(request: Request) -> Any:
                 "target": cfg["ingest"]["target_dir"],
             },
             "scanner_pending": scanner.scanner.pending(),
+            "index": {
+                "count": store.index_count(),
+                "dirs": store.index_dir_count(),
+                "running": bool(indexer.index_builder.state.get("running")),
+                "done": bool(indexer.index_builder.state.get("done")),
+                "files": int(indexer.index_builder.state.get("files") or 0),
+                "error": indexer.index_builder.state.get("error") or "",
+            },
+            "u115_calls_today": store.calls_115_today(),
             "stats": {
                 "today": today_stat,
                 "totals": totals,
@@ -468,6 +499,40 @@ async def api_test_link(request: Request) -> Any:
 @app.post("/api/cd2/test")
 async def api_cd2_test() -> Any:
     return _ok(await asyncio.to_thread(cd2.system_info, 5.0))
+
+
+# ------------------------------------------------------- 播放索引（路径 -> pick_code）
+@app.get("/api/index/status")
+async def api_index_status() -> Any:
+    return _ok(indexer.index_builder.status())
+
+
+@app.post("/api/index/build")
+async def api_index_build(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    result = await indexer.index_builder.start(force=bool((body or {}).get("force")))
+    if not result.get("ok"):
+        return _err(result.get("error") or "启动失败")
+    return _ok(indexer.index_builder.status())
+
+
+@app.post("/api/index/stop")
+async def api_index_stop() -> Any:
+    indexer.index_builder.stop()
+    logger.info("[索引] 扫描已手动停止")
+    return _ok(indexer.index_builder.status())
+
+
+@app.post("/api/index/clear")
+async def api_index_clear() -> Any:
+    indexer.index_builder.stop()
+    store.index_clear()
+    u115web.clear_file_cache()
+    logger.info("[索引] 播放索引已清空")
+    return _ok({"indexed": 0})
 
 
 # ------------------------------------------------------- 115 网页 Cookie / 操作事件

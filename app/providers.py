@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import requests
 
-from . import cd2, config, logger, u115web
+from . import cd2, logger, u115web
 
 
 class ProviderError(Exception):
@@ -35,14 +35,20 @@ def _ua(cfg: Dict[str, Any], ctx: ResolveContext) -> str:
 
 
 def _resolve_115(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> Link:
-    """115 直链：Cookie 模式（网页版接口），不再依赖开放平台。"""
+    """115 直链：Cookie 模式（网页版接口），不再依赖开放平台。
+
+    和 TgtoDrive 的 STRM 一样：只要拿到 pick_code，就只剩 1 次 /files/download。
+    """
     if not u115web.has_cookie(cfg):
         raise ProviderError("未配置 115 Cookie（设置 → 115）")
     info = u115web.file_url_by_path(cfg, cloud_path, _ua(cfg, ctx))
     url = info["url"]
     if cfg["provider"].get("force_https") and url.startswith("http://"):
         url = "https://" + url[len("http://"):]
-    return Link(url=url, provider="115", expires_in=1800)
+    # 直接用 u115web 缓存里算好的剩余寿命（已按直链自带过期时间留了 1 分钟余量），
+    # 让 nginx 后面的 302 缓存和直链缓存同时过期，避免播放中途再打一次 115。
+    expires_in = int(info.get("expires_in") or 0)
+    return Link(url=url, provider=f"115:{info.get('hit') or 'walk'}", expires_in=expires_in)
 
 
 def _resolve_cd2(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> Link:

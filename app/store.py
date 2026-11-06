@@ -89,6 +89,33 @@ def _db() -> sqlite3.Connection:
             updated_at REAL
         )"""
     )
+    # 115 请求计数：按天累计，用来核对“一场播放到底打了几次 115”
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS u115_calls (
+            day TEXT PRIMARY KEY,
+            calls INTEGER DEFAULT 0
+        )"""
+    )
+    # 播放索引：云盘路径 -> pick_code。起播命中这里就只打 1 次 /files/download，
+    # 不再逐级列目录（TgtoDrive 的 STRM 把 pickcode 写死在文件里，就是同一个道理）。
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS path_index (
+            path TEXT PRIMARY KEY,
+            pick_code TEXT NOT NULL,
+            size INTEGER DEFAULT 0,
+            name TEXT,
+            cid TEXT,
+            updated_at REAL
+        )"""
+    )
+    # 已扫过的目录：索引任务可以分多次跑，不用每次从头列目录
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS index_dirs (
+            cid TEXT PRIMARY KEY,
+            path TEXT,
+            indexed_at REAL
+        )"""
+    )
     # 老库补列：扫描类型（path=局部，full=全量）
     try:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(scans)").fetchall()}
@@ -314,3 +341,116 @@ def state_set(key: str, value: str) -> None:
 
 def db_path() -> Path:
     return config.CONFIG_DIR / "state.db"
+
+
+# ---------------------------------------------------------------- 播放索引
+def index_get(path: str) -> dict[str, Any] | None:
+    with _lock:
+        row = _db().execute(
+            "SELECT path, pick_code, size, name, cid, updated_at FROM path_index WHERE path=?",
+            (str(path),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def index_put(
+    path: str, pick_code: str, size: int = 0, name: str = "", cid: str = "", updated_at: float = 0
+) -> None:
+    if not path or not pick_code:
+        return
+    with _lock:
+        _db().execute(
+            "INSERT INTO path_index(path, pick_code, size, name, cid, updated_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET pick_code=excluded.pick_code, size=excluded.size, "
+            "name=excluded.name, cid=excluded.cid, updated_at=excluded.updated_at",
+            (str(path), str(pick_code), int(size or 0), str(name or "")[:400], str(cid or ""), float(updated_at or time.time())),
+        )
+        _db().commit()
+
+
+def index_put_many(rows: list[dict[str, Any]]) -> int:
+    """rows: [{path, pick_code, size, name, cid, updated_at}]"""
+    data = [
+        (
+            str(r.get("path") or ""), str(r.get("pick_code") or ""), int(r.get("size") or 0),
+            str(r.get("name") or "")[:400], str(r.get("cid") or ""), float(r.get("updated_at") or time.time()),
+        )
+        for r in rows
+    ]
+    data = [x for x in data if x[0] and x[1]]
+    if not data:
+        return 0
+    with _lock:
+        _db().executemany(
+            "INSERT INTO path_index(path, pick_code, size, name, cid, updated_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET pick_code=excluded.pick_code, size=excluded.size, "
+            "name=excluded.name, cid=excluded.cid, updated_at=excluded.updated_at",
+            data,
+        )
+        _db().commit()
+    return len(data)
+
+
+def index_delete(path: str) -> None:
+    with _lock:
+        _db().execute("DELETE FROM path_index WHERE path=?", (str(path),))
+        _db().commit()
+
+
+def index_delete_pick(pick_code: str) -> int:
+    if not pick_code:
+        return 0
+    with _lock:
+        cur = _db().execute("DELETE FROM path_index WHERE pick_code=?", (str(pick_code),))
+        _db().commit()
+        return int(cur.rowcount or 0)
+
+
+def index_clear() -> None:
+    with _lock:
+        _db().execute("DELETE FROM path_index")
+        _db().execute("DELETE FROM index_dirs")
+        _db().commit()
+
+
+def index_count() -> int:
+    with _lock:
+        row = _db().execute("SELECT COUNT(*) AS c FROM path_index").fetchone()
+    return int(row["c"] if row else 0)
+
+
+def index_dir_done(cid: str, ttl: float = 7 * 86400) -> bool:
+    with _lock:
+        row = _db().execute("SELECT indexed_at FROM index_dirs WHERE cid=?", (str(cid),)).fetchone()
+    return bool(row) and (time.time() - float(row["indexed_at"] or 0) < ttl)
+
+
+def mark_index_dir(cid: str, path: str = "") -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO index_dirs(cid, path, indexed_at) VALUES (?,?,?)",
+            (str(cid), str(path)[:400], time.time()),
+        )
+        _db().commit()
+
+
+def index_dir_count() -> int:
+    with _lock:
+        row = _db().execute("SELECT COUNT(*) AS c FROM index_dirs").fetchone()
+    return int(row["c"] if row else 0)
+
+
+# ---------------------------------------------------------------- 115 请求计数
+def bump_115_call(amount: int = 1) -> None:
+    day = time.strftime("%Y-%m-%d")
+    with _lock:
+        _db().execute("INSERT OR IGNORE INTO u115_calls(day, calls) VALUES (?,0)", (day,))
+        _db().execute("UPDATE u115_calls SET calls=calls+? WHERE day=?", (int(amount), day))
+        _db().commit()
+
+
+def calls_115_today() -> int:
+    day = time.strftime("%Y-%m-%d")
+    with _lock:
+        row = _db().execute("SELECT calls FROM u115_calls WHERE day=?", (day,)).fetchone()
+    return int(row["calls"]) if row else 0

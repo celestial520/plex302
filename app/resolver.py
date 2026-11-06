@@ -1,6 +1,7 @@
 """302 决策核心：请求 -> Plex 文件路径 -> 云盘路径 -> 直链。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import re
@@ -57,6 +58,9 @@ class Resolver:
         self.url_cache = TTLCache(60000)
         self._lan_nets: list[Any] = []
         self._lan_raw: list[str] = []
+        # 同一部片并发起播（Plex 常一次发 2~3 个请求）只让一个去解析，
+        # 其余等结果 —— 这是“一次播放只打一次 115”的关键一环。
+        self._resolve_locks: Dict[str, asyncio.Lock] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -249,22 +253,43 @@ class Resolver:
             store.bump_stat("redirect")
             return {"action": "redirect", "url": cached, "reason": "cache", "cloud_path": cloud_path}
 
-        try:
-            link = providers.resolve(cfg, cloud_path, providers.ResolveContext(ip=ip, ua=ua, plex_token=token))
-        except providers.ProviderError as err:
-            store.bump_stat("proxied")
-            logger.warn(f"[302] 直链获取失败，回源 Plex：{cloud_path} | {err}")
-            return self._proxy(f"直链失败：{err}")
+        # 单飞：Plex 起播会并发打同一个 part，只让第一个请求真的去取直链
+        lock = self._resolve_locks.get(cache_key)
+        if lock is None:
+            lock = self._resolve_locks[cache_key] = asyncio.Lock()
+        if len(self._resolve_locks) > 5000:
+            self._resolve_locks.clear()
+            lock = self._resolve_locks[cache_key] = asyncio.Lock()
 
-        ttl = int(cfg["advanced"]["url_cache_ttl"])
-        if link.expires_in:
-            ttl = max(30, min(ttl, link.expires_in - 60))
-        self.url_cache.set(cache_key, link.url, ttl)
-        store.bump_stat("redirect")
-        if cfg["advanced"].get("log_redirects"):
-            safe = self._safe_url(link.url)
-            logger.info(f"[302] {ip or '-'} | {link.provider} | {cloud_path} -> {safe} | {ua[:60]}")
-        return {"action": "redirect", "url": link.url, "reason": "ok", "cloud_path": cloud_path}
+        async with lock:
+            cached = self.url_cache.get(cache_key)
+            if cached:
+                store.bump_stat("redirect")
+                return {"action": "redirect", "url": cached, "reason": "cache-wait", "cloud_path": cloud_path}
+
+            try:
+                link = await asyncio.to_thread(
+                    providers.resolve, cfg, cloud_path, providers.ResolveContext(ip=ip, ua=ua, plex_token=token)
+                )
+            except providers.ProviderError as err:
+                store.bump_stat("proxied")
+                logger.warn(f"[302] 直链获取失败，回源 Plex：{cloud_path} | {err}")
+                return self._proxy(f"直链失败：{err}")
+
+            ttl = int(cfg["advanced"]["url_cache_ttl"])
+            if link.expires_in:
+                # 115 的 expires_in 已经是「直链缓存剩余寿命」，内部已留好余量，
+                # 这里不再二次扣减，两层缓存一起过期、一起只刷新一次。
+                ttl = max(30, min(ttl, link.expires_in))
+            self.url_cache.set(cache_key, link.url, ttl)
+            store.bump_stat("redirect")
+            if cfg["advanced"].get("log_redirects"):
+                safe = self._safe_url(link.url)
+                logger.info(
+                    f"[302] {ip or '-'} | {link.provider} | {cloud_path} -> {safe} | "
+                    f"缓存 {ttl}s | {ua[:60]}"
+                )
+            return {"action": "redirect", "url": link.url, "reason": "ok", "cloud_path": cloud_path}
 
     @staticmethod
     def _safe_url(url: str) -> str:

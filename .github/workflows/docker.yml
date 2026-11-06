@@ -21,6 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 播放链路单测（连续播放只打一次 115）
+        run: |
+          set -e
+          python3 -c 'import requests' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages requests
+          python3 tests/test_play_once.py
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -40,6 +47,7 @@ jobs:
             -e TZ=Asia/Shanghai \
             -e P115_WEBAPI_BASE=http://host.docker.internal:32403 \
             -e P115_EVENT_BASE=http://host.docker.internal:32403 \
+            -e PLEX302_AUTO_INDEX=0 \
             -e NGINX_PORT=32500 \
             -e WEBUI_PORT=999 \
             -p 32500:32500 -p 999:999 \
@@ -186,6 +194,29 @@ jobs:
           grep -iE '^(HTTP/1.1 302|Location:|X-Plex302:)' headers2.txt || { echo "::error::Cookie 直链没有 302"; cat headers2.txt; exit 1; }
           grep -qi '32402/media' headers2.txt || { echo "::error::Cookie 直链没有指向 115 下载地址"; cat headers2.txt; exit 1; }
           echo "Cookie 直链 OK"
+
+          echo "--- 连续播放不再请求 115（播放索引 + 直链缓存） ---"
+          curl -s -m 10 -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            -d '{"force":true}' http://127.0.0.1:999/api/index/build > /dev/null
+          idx=''
+          for i in $(seq 1 40); do
+            idx=$(curl -s -m 10 -b cookie.txt http://127.0.0.1:999/api/index/status)
+            echo "$idx" | grep -q '"running": *false' && break
+            sleep 2
+          done
+          echo "索引状态 $idx"
+          echo "$idx" | grep -q '"indexed": *[1-9]' || { echo "::error::播放索引没有建起来"; exit 1; }
+
+          calls() { curl -s -m 10 -b cookie.txt http://127.0.0.1:999/api/status \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["u115_calls_today"])'; }
+          before=$(calls)
+          for i in $(seq 1 6); do
+            curl -s -o /dev/null -H 'X-Forwarded-For: 8.8.8.8' \
+              'http://127.0.0.1:32500/library/parts/123/1/file.mkv'
+          done
+          after=$(calls)
+          echo "连续 6 次播放：今日 115 请求 $before -> $after"
+          [ "$after" = "$before" ] || { echo "::error::连续播放仍在重复请求 115"; exit 1; }
 
           echo "--- 局域网也 302 ---"
           curl -s -b cookie.txt http://127.0.0.1:999/api/config > cfg.json
