@@ -53,6 +53,10 @@ IGNORE_TYPES = {3, 4, 7, 8, 9, 10, 19}
 # 目录类事件：扫描目录本身（而不是它所在的父目录）
 DIR_EVENT_TYPES = {17, 18, 20}
 TYPE_DELETE = 22
+# 移动 / 改名：官方接口看不到这两类（它只按「上传时间」认文件），
+# 而 CMS 整理恰恰就是先移动到 media 目录、再改名，所以必须靠事件补。
+TYPE_MOVE = 6
+TYPE_RENAME = 24
 
 
 def _as_int(value: Any, default: int = 0) -> int:

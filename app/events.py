@@ -231,6 +231,10 @@ class EventWatcher:
                 )
             if item["type"] == u115events.TYPE_DELETE:
                 store.index_delete(cloud_path)
+            # 移动/改名：pickcode 不变、路径变了。旧路径不处理的话，Plex 会一直
+            # 挂着已经不存在的条目；这正是 plex-demo（只看上传时间）漏入库的根因。
+            if item["type"] in (u115events.TYPE_MOVE, u115events.TYPE_RENAME):
+                await self._refresh_old_path(cfg, cloud_path, item)
             plex_path = resolver.resolver.map_plex_path(cfg, cloud_path) or ""
             if not plex_path:
                 self._warn_once(
@@ -328,6 +332,35 @@ class EventWatcher:
             # 新建/复制/改名：扫目录本身；其它目录类事件也扫目录本身
             return scanner.scanner.normalize(plex_path)
         return scanner.scanner.derive_scan_path(plex_path, section)
+
+    async def _refresh_old_path(self, cfg: Dict[str, Any], new_cloud: str, item: Dict[str, Any]) -> None:
+        """移动/改名后，把旧位置从索引里清掉，并让 Plex 再扫一次旧目录。
+
+        115 的 pickcode 跟文件走、不跟目录走，所以能用它反查旧路径；
+        旧目录不刷，Plex 就会一直显示一个已经不在那里的条目。
+        """
+        pick = str(item.get("pick_code") or "")
+        if not pick:
+            return
+        try:
+            olds = [p for p in store.index_paths_by_pick(pick) if p != new_cloud]
+        except Exception as err:  # noqa: BLE001 查不到旧路径不影响新路径入库
+            logger.warn(f"[115事件] 查旧路径失败：{err}")
+            return
+        for old in olds:
+            store.index_delete(old)
+            plex_old = resolver.resolver.map_plex_path(cfg, old) or ""
+            if not plex_old:
+                continue
+            try:
+                section = await asyncio.to_thread(plex.section_for_path, plex_old)
+            except plex.PlexError:
+                continue
+            if not section:
+                continue
+            parent = os.path.dirname(plex_old.rstrip("/")) or "/"
+            self._add_pending(scanner.scanner.normalize(parent), section, source="115event-move", force=True)
+            logger.info(f"[115事件] 旧位置也要刷新：{old} -> 待扫 {parent}")
 
     def _add_pending(self, target: str, section: Dict[str, Any], source: str, force: bool = False) -> None:
         cfg = config.load()

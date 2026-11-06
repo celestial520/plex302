@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import subprocess
 import time
@@ -15,12 +16,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
-    scanner, scheduler, store, u115events, u115ops, u115web, watcher, wecom,
+    scanner, scheduler, store, u115events, u115open, u115ops, u115web, watcher, wecom,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.7.3"
+VERSION = "1.8.0"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -238,6 +239,7 @@ async def api_status(request: Request) -> Any:
             "plex": plex_status,
             "cd2": cd2_status,
             "u115": {"cookie_set": bool(cfg["u115"].get("cookie")), "cookie_hint": ("…" + cfg["u115"]["cookie"][-6:]) if cfg["u115"].get("cookie") else ""},
+            "open115": u115open.token_state(cfg),
             "provider": cfg["provider"]["type"],
             "scan_watch_on": bool(cfg["scan"].get("watch_enabled")),
             "lan_redirect": bool(cfg["server"].get("redirect_lan")),
@@ -582,6 +584,69 @@ async def api_index_clear() -> Any:
     u115web.clear_file_cache()
     logger.info("[索引] 播放索引已清空")
     return _ok({"indexed": 0})
+
+
+# ------------------------------------------------------- 115 开放平台（官方 OpenAPI）
+def _qr_svg(text: str) -> bytes:
+    import qrcode
+    import qrcode.image.svg
+
+    img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue()
+
+
+@app.post("/api/115open/login/start")
+async def api_115open_login_start() -> Any:
+    try:
+        data = await asyncio.to_thread(u115open.start_login)
+    except u115open.Open115Error as err:
+        return _err(str(err))
+    return _ok(data)
+
+
+@app.get("/api/115open/login/qr.svg")
+async def api_115open_login_qr(uid: str) -> Any:
+    text = u115open.qr_text(uid)
+    if not text:
+        return Response(status_code=404, content=b"expired")
+    try:
+        svg = await asyncio.to_thread(_qr_svg, text)
+    except Exception as err:  # noqa: BLE001
+        logger.warn(f"[115Open] 生成二维码失败：{err}")
+        return Response(status_code=500, content=b"qr error")
+    return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/115open/login/status")
+async def api_115open_login_status(uid: str = "") -> Any:
+    cfg = config.load()
+    if not uid:
+        return _ok(u115open.token_state(cfg))
+    try:
+        st = await asyncio.to_thread(u115open.poll_login, uid)
+    except u115open.Open115Error as err:
+        return _err(str(err))
+    if int(st.get("status") or 0) == 2:
+        try:
+            info = await asyncio.to_thread(u115open.finish_login, cfg, uid)
+        except u115open.Open115Error as err:
+            return _err(str(err))
+        return _ok({"status": 2, "logged_in": True, **info})
+    return _ok({"status": st.get("status"), "message": st.get("message") or ""})
+
+
+@app.get("/api/115open/status")
+async def api_115open_status() -> Any:
+    return _ok(u115open.token_state(config.load()))
+
+
+@app.post("/api/115open/logout")
+async def api_115open_logout() -> Any:
+    cfg = config.load()
+    await asyncio.to_thread(u115open.logout, cfg)
+    return _ok(u115open.token_state(cfg))
 
 
 # ------------------------------------------------------- 115 网页 Cookie / 操作事件

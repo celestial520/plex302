@@ -595,10 +595,25 @@
         <div class="field full"><button class="btn sm" id="btn-add-mount"><svg><use href="#i-plus"></use></svg>添加一条映射</button></div>
       `, true)}
 
-      ${section('直链方式', '决定 302 的目标从哪里来。115 走 Cookie，最省事；CD2 需要直链权限；AList 适合混合网盘。', `
+      ${section('115 官方接口（播放直链）', '播放时由 115 开放平台按完整路径直接返回直链，和 plex-demo 同一条链路：一次请求定位，不列目录、不占网页 Cookie 的风控额度。access_token 每 2 小时自动续期。', `
+        <div class="field full">
+          <div class="field-row">
+            <span class="pill ${(c.u115_open && c.u115_open.logged_in) ? 'ok' : 'bad'}" id="open115-pill"><i class="dot"></i>${(c.u115_open && c.u115_open.logged_in) ? esc('已登录' + (c.u115_open.user_name ? '：' + c.u115_open.user_name : '')) : '未登录'}</span>
+            <button class="btn sm" id="btn-open115-login">扫码登录</button>
+            <button class="btn sm ghost" id="btn-open115-logout">退出登录</button>
+          </div>
+          <div id="open115-qr" style="display:none;margin-top:12px">
+            <img id="open115-qr-img" alt="115 登录二维码" style="width:180px;height:180px;background:#fff;padding:8px;border-radius:10px">
+            <p class="hint" id="open115-qr-tip">用 115 App 扫码并确认，这里会自动检测结果（二维码 5 分钟有效）</p>
+          </div>
+          <div class="result-box" id="open115-msg" style="margin-top:8px">${(c.u115_open && c.u115_open.logged_in) ? '播放直链走 115 官方接口' : '还没登录：播放会回退到网页 Cookie（填了才有）。建议先扫码登录。'}</div>
+        </div>
+      `, true)}
+
+      ${section('直链方式', '决定 302 的目标从哪里来。推荐「115 官方接口」：路径 → pickcode 一次请求搞定；Cookie 只留给下面「自动入库」的事件监听。', `
         <div class="field"><label>直链来源</label>
           <select id="cfg-provider">
-            ${[['115', '115（网页 Cookie，推荐）'], ['cd2', 'CloudDrive2 直链'], ['alist', 'AList / OpenList'], ['custom', '自定义 HTTP 接口'], ['none', '不 302，全部回源 Plex']]
+            ${[['open115', '115 官方接口（推荐，扫码登录）'], ['mp', 'MoviePilot（借 MP 的 115 官方接口）'], ['115', '115 纯 Cookie（不推荐）'], ['cd2', 'CloudDrive2 直链'], ['alist', 'AList / OpenList'], ['custom', '自定义 HTTP 接口'], ['none', '不 302，全部回源 Plex']]
               .map((x) => `<option value="${x[0]}" ${c.provider.type === x[0] ? 'selected' : ''}>${x[1]}</option>`).join('')}
           </select>
         </div>
@@ -609,6 +624,14 @@
           </select>
         </div>
         <div class="field"><label>固定 UA</label>${input('cfg-fixed-ua', c.provider.fixed_ua, 'Plex302/1.0')}</div>
+        <div class="field full" id="mp-fields">
+          <div class="callout info">播放时由 MoviePilot 用 115 开放平台接口按完整路径取 pickcode（1 次请求就能定位，不需要逐级列目录），再由本程序用下面的 115 Cookie 换直链并 302。<br>Cookie 仍然必填：换直链要用它，「局部入库」的事件监听也用它；两者互不影响。</div>
+          <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
+            <div class="field"><label>MoviePilot 地址</label>${input('cfg-mp-base', c.provider.mp_base, 'http://127.0.0.1:3000')}</div>
+            <div class="field"><label>MP API Token</label>${input('cfg-mp-token', '', c.provider.mp_token_set ? '已保存，留空不修改' : 'MP → 设置 → 系统 → API Token', 'password')}</div>
+            <div class="field"><label>MP 里的存储类型</label>${input('cfg-mp-storage', c.provider.mp_storage, 'u115')}</div>
+          </div>
+        </div>
         <div class="field full" id="alist-fields">
           <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
             <div class="field"><label>AList 地址</label>${input('cfg-alist-base', c.provider.alist_base, 'http://127.0.0.1:5244')}</div>
@@ -885,8 +908,66 @@
         $('#cfg-old-pass').value = ''; $('#cfg-new-pass').value = '';
       } catch (err) { toast(err.message, 'bad'); }
     });
+    const open115LoginBtn = $('#btn-open115-login');
+    if (open115LoginBtn) open115LoginBtn.addEventListener('click', startOpen115Login);
+    const open115LogoutBtn = $('#btn-open115-logout');
+    if (open115LogoutBtn) open115LogoutBtn.addEventListener('click', logoutOpen115);
     $('#cfg-provider').addEventListener('change', updateProviderFields);
     updateProviderFields();
+  }
+
+  let open115Timer = null;
+
+  async function startOpen115Login() {
+    const box = $('#open115-qr');
+    const msg = $('#open115-msg');
+    try {
+      const r = await api('/api/115open/login/start', { method: 'POST' });
+      const d = r.data || {};
+      if (!d.uid) throw new Error('115 没有返回二维码');
+      $('#open115-qr-img').src = '/api/115open/login/qr.svg?uid=' + encodeURIComponent(d.uid) + '&_=' + Date.now();
+      box.style.display = '';
+      msg.textContent = '请用 115 App 扫码确认';
+      if (open115Timer) clearInterval(open115Timer);
+      open115Timer = setInterval(() => pollOpen115(d.uid), 2000);
+    } catch (err) {
+      msg.textContent = err.message || '获取二维码失败';
+    }
+  }
+
+  async function pollOpen115(uid) {
+    try {
+      const r = await api('/api/115open/login/status?uid=' + encodeURIComponent(uid));
+      const d = r.data || {};
+      if (d.logged_in) {
+        clearInterval(open115Timer); open115Timer = null;
+        $('#open115-qr').style.display = 'none';
+        const name = d.user_name ? '：' + d.user_name : '';
+        $('#open115-msg').textContent = '登录成功' + name + '，播放直链现在走 115 官方接口';
+        const pill = $('#open115-pill');
+        if (pill) { pill.className = 'pill ok'; pill.innerHTML = '<i class="dot"></i>' + esc('已登录' + name); }
+        toast('115 登录成功', 'ok');
+        return;
+      }
+      const status = Number(d.status || 0);
+      if (status === -1 || status === -2) {
+        clearInterval(open115Timer); open115Timer = null;
+        $('#open115-msg').textContent = '二维码已失效或已取消，重新点「扫码登录」';
+        return;
+      }
+      if (status === 1) $('#open115-msg').textContent = '已扫码，请在手机上点「确认登录」';
+      else if (d.message) $('#open115-msg').textContent = d.message;
+    } catch (err) { /* 单次轮询失败忽略，下一轮再试 */ }
+  }
+
+  async function logoutOpen115() {
+    try {
+      await api('/api/115open/logout', { method: 'POST' });
+      const pill = $('#open115-pill');
+      if (pill) { pill.className = 'pill bad'; pill.innerHTML = '<i class="dot"></i>未登录'; }
+      $('#open115-msg').textContent = '已退出登录：播放会回退到网页 Cookie（填了才有）';
+      toast('已退出 115 登录', 'ok');
+    } catch (err) { toast(err.message || '退出失败', 'bad'); }
   }
 
   function bindMountDelete(scope) {
@@ -905,6 +986,8 @@
     const type = $('#cfg-provider').value;
     $('#alist-fields').style.display = type === 'alist' ? '' : 'none';
     $('#custom-fields').style.display = type === 'custom' ? '' : 'none';
+    const mpBox = $('#mp-fields');
+    if (mpBox) mpBox.style.display = type === 'mp' ? '' : 'none';
   }
 
   function collectConfig() {
@@ -926,6 +1009,9 @@
     c.provider.alist_public_base = val('cfg-alist-public');
     c.provider.custom_url = val('cfg-custom-url');
     if (val('cfg-custom-token')) c.provider.custom_token = val('cfg-custom-token');
+    c.provider.mp_base = val('cfg-mp-base');
+    if (val('cfg-mp-token')) c.provider.mp_token = val('cfg-mp-token');
+    c.provider.mp_storage = val('cfg-mp-storage') || 'u115';
     c.provider.force_https = checked('cfg-force-https');
 
     c.mounts = $$('#mount-list .mount-row').map((row, i) => ({

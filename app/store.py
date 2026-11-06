@@ -406,6 +406,19 @@ def index_delete_pick(pick_code: str) -> int:
         return int(cur.rowcount or 0)
 
 
+def index_paths_by_pick(pick_code: str) -> list[str]:
+    """同一个 pickcode 在索引里可能还挂着旧路径（移动/改名后）。
+
+    pickcode 跟着文件走、不跟着目录走，所以用它反查旧路径最准；
+    旧路径所在目录要再扫一次，Plex 才会把旧位置的条目删掉。
+    """
+    if not pick_code:
+        return []
+    with _lock:
+        rows = _db().execute("SELECT path FROM path_index WHERE pick_code=?", (str(pick_code),)).fetchall()
+    return [str(r["path"]) for r in rows]
+
+
 def index_clear() -> None:
     with _lock:
         _db().execute("DELETE FROM path_index")

@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
         "token": "",
     },
     "provider": {
-        "type": "115",  # 115 | cd2 | alist | custom | none
+        "type": "open115",  # open115 | mp | 115 | cd2 | alist | custom | none
         "ua_mode": "client",  # client | fixed
         "fixed_ua": "Plex302/1.0",
         "force_https": True,
@@ -62,6 +63,9 @@ DEFAULTS: dict[str, Any] = {
         "alist_public_base": "",
         "custom_url": "",
         "custom_token": "",
+        "mp_base": "",
+        "mp_token": "",
+        "mp_storage": "u115",
     },
     "scan": {
         "enabled": True,
@@ -88,6 +92,14 @@ DEFAULTS: dict[str, Any] = {
         "webhook_token": "",
         # 给 CMS 的 Emby 兼容入口用（CMS 里 EMBY_API_KEY 填这个）
         "emby_token": "",
+    },
+    # 115 开放平台（官方 OpenAPI）：播放链路的凭据，扫码登录，2 小时自动续期
+    "u115_open": {
+        "client_id": "100195313",
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0,
+        "user_name": "",
     },
     # 115 网页版 Cookie：开放平台没有“最近操作”接口，靠它补
     "u115": {
@@ -230,7 +242,7 @@ def normalize(cfg: dict) -> dict:
 
     provider = cfg["provider"]
     ptype = str(provider.get("type") or "115").lower()
-    provider["type"] = ptype if ptype in ("115", "cd2", "alist", "custom", "none") else "115"
+    provider["type"] = ptype if ptype in ("open115", "mp", "115", "cd2", "alist", "custom", "none") else "open115"
     provider["ua_mode"] = "fixed" if str(provider.get("ua_mode")) == "fixed" else "client"
     provider["fixed_ua"] = str(provider.get("fixed_ua") or "Plex302/1.0")[:200]
     provider["force_https"] = _as_bool(provider.get("force_https"), True)
@@ -239,6 +251,16 @@ def normalize(cfg: dict) -> dict:
     provider["alist_public_base"] = str(provider.get("alist_public_base") or "").strip().rstrip("/")
     provider["custom_url"] = str(provider.get("custom_url") or "").strip()
     provider["custom_token"] = str(provider.get("custom_token") or "").strip()
+    provider["mp_base"] = str(provider.get("mp_base") or "").strip().rstrip("/")
+    provider["mp_token"] = str(provider.get("mp_token") or "").strip()
+    provider["mp_storage"] = str(provider.get("mp_storage") or "u115").strip() or "u115"
+
+    u115_open = cfg.setdefault("u115_open", {})
+    u115_open["client_id"] = str(u115_open.get("client_id") or "100195313").strip() or "100195313"
+    u115_open["access_token"] = str(u115_open.get("access_token") or "").strip()
+    u115_open["refresh_token"] = str(u115_open.get("refresh_token") or "").strip()
+    u115_open["expires_at"] = _as_int(u115_open.get("expires_at"), 0, 0, 4102444800)
+    u115_open["user_name"] = str(u115_open.get("user_name") or "")[:120]
 
     scan = cfg["scan"]
     scan["enabled"] = _as_bool(scan.get("enabled"), True)
@@ -413,12 +435,19 @@ def masked(cfg: dict) -> dict:
     out["provider"]["alist_token"] = ""
     out["provider"]["custom_token_set"] = bool(out["provider"].get("custom_token"))
     out["provider"]["custom_token"] = ""
+    out["provider"]["mp_token_set"] = bool(out["provider"].get("mp_token"))
+    out["provider"]["mp_token"] = ""
     out["cd2"]["token_set"] = bool(out["cd2"].get("token"))
     out["cd2"]["token"] = ""
     cookie = out["u115"].get("cookie") or ""
     out["u115"]["cookie_set"] = bool(cookie)
     out["u115"]["cookie_hint"] = ("…" + cookie[-6:]) if cookie else ""
     out["u115"]["cookie"] = ""
+    open115 = out.setdefault("u115_open", {})
+    open115["logged_in"] = bool(open115.get("access_token") or open115.get("refresh_token"))
+    open115["expires_in"] = max(0, int(open115.get("expires_at") or 0) - int(time.time()))
+    open115["access_token"] = ""
+    open115["refresh_token"] = ""
     out["security"]["password_set"] = bool(out["security"].get("password_hash"))
     out["security"].pop("password_hash", None)
     out["notify"]["wecom_secret_set"] = bool(out["notify"].get("wecom_secret"))
@@ -443,6 +472,15 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
         provider["alist_token"] = old_provider.get("alist_token", "")
     if not provider.get("custom_token"):
         provider["custom_token"] = old_provider.get("custom_token", "")
+    if not provider.get("mp_token"):
+        provider["mp_token"] = old_provider.get("mp_token", "")
+    open115 = new_cfg.setdefault("u115_open", {})
+    old_open115 = old_cfg.get("u115_open", {})
+    open115.pop("logged_in", None)
+    open115.pop("expires_in", None)
+    for key in ("access_token", "refresh_token", "expires_at", "user_name"):
+        if not open115.get(key):
+            open115[key] = old_open115.get(key, "" if key != "expires_at" else 0)
     u115 = new_cfg.setdefault("u115", {})
     old_u115 = old_cfg.get("u115", {})
     u115.pop("cookie_set", None)
