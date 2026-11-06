@@ -5,7 +5,7 @@
   Token：随便填一串（这里填一样的）
   EncodingAESKey：随机生成 43 位（这里填一样的）
 
-企业微信要求 5 秒内响应，所以重活（转存/离线/整理）都丢到后台线程，
+企业微信要求 5 秒内响应，所以重活（转存 / 离线）都丢到后台线程，
 先回一句「收到」，干完再用应用消息把结果发回来。
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from . import config, ingest, logger, notify, organize
+from . import config, ingest, logger, notify
 
 BLOCK = 32
 
@@ -158,45 +158,27 @@ def dispatch(cfg: Dict[str, Any], content: str, user: str = "") -> str:
     if links:
         _background(lambda: _run_ingest(text, user), "链接入库")
         kinds = "、".join({"share": "115 分享", "magnet": "磁力", "ed2k": "ed2k"}[x["type"]] for x in links)
-        return f"收到 {kinds}，正在转存到待整理目录，完成后再通知你。"
+        return f"收到 {kinds}，正在转存到入库目录，完成后再通知你。"
     if re.fullmatch(r"(状态|status)", text, re.I):
         return status_text(cfg)
-    if re.fullmatch(r"(预演|预览|dry)", text, re.I):
-        _background(lambda: _run_organize(True, user), "预演整理")
-        return "收到，正在预演（不会动文件），结果马上发你。"
-    if re.fullmatch(r"(整理|开始整理|organize)", text, re.I):
-        _background(lambda: _run_organize(False, user), "执行整理")
-        return "收到，开始整理，完成后把清单发你。"
     if re.search(r"(帮助|help|怎么用|\?)", text, re.I) and len(text) < 20:
         return help_text()
-    return "没看懂。发 115 分享链接 / 磁力 / ed2k，或者发「整理」「预演」「状态」。\n\n" + help_text()
+    return "没看懂。发 115 分享链接 / 磁力 / ed2k，或者发「状态」。\n\n" + help_text()
 
 
 def help_text() -> str:
     return (
         "Plex302 指令：\n"
-        "· 直接发 115 分享链接（带提取码也行）→ 转存到待整理\n"
+        "· 直接发 115 分享链接（带提取码也行）→ 转存到入库目录\n"
         "· 直接发 magnet / ed2k → 115 离线下载到待整理\n"
-        "· 预演 → 只列整理计划，不动文件\n"
-        "· 整理 → 按 TMDB 识别结果改名并归档\n"
-        "· 状态 → 看最近一次整理/入库结果"
+        "· 状态 → 看最近的入库和扫描结果"
     )
 
 
 def status_text(cfg: Dict[str, Any]) -> str:
     from . import events, watcher
 
-    org = organize.organizer.status()
-    summary = org.get("summary") or {}
     lines = ["Plex302 状态"]
-    if summary:
-        lines.append(
-            f"· 最近整理：{'预演' if summary.get('dry_run') else '执行'} "
-            f"计划 {summary.get('planned', 0)} / 完成 {summary.get('done', 0)} / "
-            f"跳过 {summary.get('skipped', 0)} / 失败 {summary.get('failed', 0)}"
-        )
-    else:
-        lines.append("· 还没跑过整理")
     ev = events.event_watcher.last_summary or {}
     if ev:
         lines.append(f"· 115 事件：检查 {ev.get('checked', 0)} 条 / 新 {ev.get('new', 0)} / 待扫 {ev.get('queued', 0)}")
@@ -233,31 +215,3 @@ def _run_ingest(text: str, user: str) -> None:
         else:
             lines.append(f"· 失败：{item.get('error')}")
     notify.send_wecom("Plex302 · 链接已入库", "\n".join(lines), force=True)
-    if cfg["organize"].get("enabled"):
-        # 给 115 一点落盘时间，再自动整理
-        time.sleep(20)
-        _run_organize(None, user, trigger="入库后自动整理")
-
-
-def _run_organize(dry: Optional[bool], user: str, trigger: str = "") -> None:
-    cfg = config.load()
-    forced = dry is False and bool(cfg["organize"].get("dry_run"))
-    if forced:
-        # 设置里还是「只预演」，微信里说「整理」也不越过这个开关
-        dry = True
-    summary = organize.organizer.run(dry_run=dry)
-    lines = [
-        f"计划 {summary['planned']} · 完成 {summary['done']} · 跳过 {summary['skipped']} · 失败 {summary['failed']}",
-    ]
-    for row in (summary.get("items") or [])[:12]:
-        name = row.get("source_name") or row.get("source_path", "")
-        if row["action"] in ("move", "done"):
-            lines.append(f"· {name} → {row.get('target_path')}")
-        elif row.get("reason"):
-            lines.append(f"· {name}：{row['reason']}")
-    if len(summary.get("items") or []) > 12:
-        lines.append(f"…… 还有 {len(summary['items']) - 12} 条")
-    title = "Plex302 · 整理预演" if summary.get("dry_run") else "Plex302 · 整理完成"
-    if forced:
-        lines.append("（当前设置是「只预演」，没有真的移动文件）")
-    notify.send_wecom(title, "\n".join(lines) + (f"\n（{trigger}）" if trigger else ""), force=True)

@@ -27,6 +27,7 @@ def _post(
     timeout: int = 20,
     base: Optional[str] = None,
 ) -> Dict[str, Any]:
+    u115web.pace()  # 写操作同样受 115 风控节奏约束
     url = (base or BASE) + path
     headers = {
         "Cookie": u115web._cookie(cfg),  # noqa: SLF001
@@ -286,5 +287,5 @@ def wait_received(
             last = items
             if items:
                 return items
-        time.sleep(1.5)
+        time.sleep(u115web.API_GAP)
     return last

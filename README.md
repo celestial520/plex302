@@ -10,7 +10,24 @@ Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 str
 
 ---
 
+## v1.5.0 更新
+
+| 变化 | 说明 |
+|---|---|
+| **移除自建整理** | 设置里的「识别与整理（TMDB / AI）」整段删除，整理交回 CMS / 其它工具；只保留「链接入库」 |
+| **企业微信不能再触发整理** | 只保留发链接和「状态」，`整理` / `预演` 指令下线 |
+| **移除 CMS 对接设置项** | 设置页不再出现「CMS 对接」；`/emby` 和 `/api/hook` 接口保留，地址见文档 |
+| **企业微信通知改版** | 改成一字段一行（企业ID / 应用Secret / 应用ID / 接收人 / API代理 / 状态），去掉示例文字 |
+| **115 请求间隔统一到 2.05 秒** | 和 CMS 默认的 2.0 秒对齐（只慢不快）：事件反查、入库、目录操作全部走这个节奏；直链有缓存，走独立通道 |
+| **compose 不再挂 CD2 路径** | 和 plex-demo 一样，挂载路径全部在 WebUI 的「路径映射」里配 |
+
+从 1.4.x 升级：旧配置里的 `organize` / `metadata` / `ai` 会被自动忽略，不用手动清。
+
+---
+
 ## v1.4.0 更新
+
+> 其中「自建整理 / AI 兜底 / 出站代理 / 企业微信整理指令」已在 1.5.0 移除，仅作历史记录。
 
 | 变化 | 说明 |
 |---|---|
@@ -53,11 +70,8 @@ Plex 通过 **CD2 挂载**直接扫描云盘里的真实文件，**不生成 str
 | 全量同步 | 调 `refresh` 不带 path，整库扫一遍；支持每天定时 + 手动一键 |
 | 115 操作事件 | 读 115「最近操作」流水，游标增量，CMS 一落盘就能发现 |
 | CD2 缓存刷新 | 扫描前用 CD2 gRPC 刷新目录（Token 可选），避免新文件不可见 |
-| CMS 对接 | Emby 兼容入口 + Webhook + 目录监听三重保险 |
-| 自建整理 | TMDB 识别 + 模板命名 + 115 上真实移动/改名，可完全替代 CMS 的整理功能 |
+| Emby 兼容入口 | `/emby/Library/Refresh`，给 CMS / 其它只支持 Emby 通知的工具调用 |
 | 链接入库 | 115 分享转存 / 磁力 / ed2k 离线，企业微信或 WebUI 直接发 |
-| AI 兜底 | TMDB 失败时调用 DeepSeek / OpenAI 兼容接口，只发文件名 |
-| 出站代理 | TMDB / AI 可走代理，115 保持直连 |
 | 企业微信通知 | 增量入库、全量结果、错误告警，同 115 秒传助手一套配置 |
 | WebUI | 状态、媒体库、扫描记录、事件流水、日志、路径映射；深/浅色 + 手机版 |
 
@@ -131,8 +145,6 @@ services:
     volumes:
       - ./config:/config
       - ./log:/var/log/nginx
-      # 必须和 Plex 里看到的 CD2 路径一致；只做路径映射，不读文件内容
-      - /mnt/cd2:/mnt/cd2
 ```
 
 ```bash
@@ -261,33 +273,21 @@ GET /library/sections/<sectionId>/refresh?X-Plex-Token=<token>
 
 ---
 
-## CMS 整理完，到底能不能通知 plex302？
+## 和 CMS / MoviePilot 怎么配合？
 
-**能，但取决于你用不用 strm。** 说清楚三种情况：
+plex302 不依赖 CMS，也不生成 strm。CMS 整理完的文件落在 115 上，115 会记录「移动 / 改名」事件，
+plex302 读这条事件就知道该扫哪个目录——**不需要 CMS 主动通知**。
 
-### ① CMS 开了 strm（能通知）
-
-CMS 生成 strm 后会调 Emby 的扫库接口。把它的 Emby 地址直接指向 plex302：
+如果 CMS 开了 strm、想让它调扫库，可以把 Emby 地址指向本容器：
 
 ```yaml
 EMBY_HOST_PORT=http://NAS:999
-EMBY_API_KEY=设置页「CMS 对接」里显示的 emby_token
+EMBY_API_KEY=<webui 里 /emby 入口带的 api_key>
 ```
 
-它请求 `POST /emby/Library/Refresh`，plex302 收到就触发全量（或按库扫描）。这条是**秒级**的。
+支持 `/emby/System/Info`、`/emby/Library/Refresh`、`/emby/Library/Sections/{id}/Refresh`、`/emby/Items/{id}/Refresh`。
 
-支持：`/emby/System/Info`、`/emby/Library/Refresh`、`/emby/Library/Sections/{id}/Refresh`、`/emby/Items/{id}/Refresh`。
-
-### ② CMS 没开 strm（不能通知）
-
-你这种「真实文件入库、不生成 strm」的用法，CMS 生成完不会调 Emby，**也没有通用 webhook**。
-这时只能靠 **115 操作事件**——这也是 CMS 自己做增量同步的办法（它的文档里写得很清楚：增量依赖 115 生活事件）。
-
-好消息是：事件是 115 服务端产生的，和 CMS 有没有通知无关，CMS 移动完文件的那一刻事件就有了。
-
-### ③ 其它工具（MoviePilot / 脚本）
-
-用通用 Webhook：
+其它工具（MoviePilot / 自己写的脚本）用通用 Webhook：
 
 ```bash
 curl -G "http://NAS:999/api/hook" --data-urlencode "token=p302_xxx" --data-urlencode "path=/电影/沙丘2 (2024)"
@@ -298,79 +298,16 @@ curl -X POST "http://NAS:999/api/hook?token=p302_xxx&full=1"
 
 ---
 
-## 不用 CMS：自建整理 + 链接入库 + AI 兜底
+## 链接入库（115 分享 / 磁力 / ed2k）
 
-> 先把话说清楚：TgtoDrive 是**功能参考**，不是代码移植。它那套（TMDB 识别 → 分类命名 → 归档、AI 辅助、代理、企业微信）验证了这条路走得通；这里按 plex302 的「真实文件 + 302」路线重写了一遍，没有生成 strm，也没有搬它的代码。
+把链接发到企业微信，或者粘到「媒体库 → 链接入库」，plex302 会转存 / 离线到指定目录，之后照常由 115 事件触发扫库。
 
-### 它到底做什么
+### 1. 建自建应用
 
-一条视频从进网盘到能被 Plex 播，只有四步：
+企业微信管理后台 → 应用管理 → 自建 → 创建应用 → 记下 `AgentId`、`Secret`，企业信息里拿 `CorpID`。
+这三个填到「设置 → 通知（企业微信）」。
 
-```text
-链接/磁力 ──► 转存到「待整理」 ──► TMDB 识别 + 改名归档 ──► Plex 扫库 ──► 302 播放
-             (ingest)            (organize)              (scan)        (resolver)
-```
-
-| 步骤 | 做 | 不做 |
-|---|---|---|
-| 链接入库 | 115 分享转存、磁力/ed2k 离线到待整理目录 | 不下载到本地、不占 NAS 空间 |
-| 整理 | 建目录、移动文件、重命名（都是 115 上的真实操作） | 不改视频内容、不转码、不生成 strm |
-| 识别 | 文件名解析 + TMDB；失败才问 AI | 不刮海报/nfo（交给 Plex） |
-| 入库 | 整理完直接调 Plex `refresh?path=` | 不整库扫描 |
-
-### 整理规则
-
-默认模板（设置页可改）：
-
-```text
-电影：{movie_dir}/{title} ({year})/{title} ({year}).mkv
-剧集：{tv_dir}/{title} ({year})/Season {season:02d}/{title} ({year}) - S{season:02d}E{episode:02d}.mkv
-```
-
-支持的占位符：`{title}` `{year}` `{season}` `{season:02d}` `{episode}` `{episode:02d}` `{tmdb_id}`。扩展名自动保留。
-
-文件名解析认这些写法：
-
-- `沙丘2.Dune.Part.Two.2024.2160p.WEB-DL.mkv` → 沙丘2 / 2024 / 电影
-- `三体.S01E05.2023.1080p.mkv` → 三体 / 2023 / S01E05
-- `繁花 第05集.mkv` → 繁花 / S01E05（季默认 1）
-- `01.mkv` 放在 `沙丘2 (2024)` 里 → 用目录名当片名
-- `[电影天堂] 沙丘2.2024.BD1080P.中字.mkv` → 去掉组名和画质标记
-
-中英混排会拆成「中文名 / 英文名 / 前三个词」分别搜 TMDB，取相似度最高的一条；低于 0.52 视为没认出来。
-
-### 安全边界（重要）
-
-| 情况 | 行为 |
-|---|---|
-| `dry_run=true`（默认） | 只出清单，不移动任何文件 |
-| 目标文件已存在 | 默认跳过，不覆盖（要洗版才打开「覆盖」） |
-| 认不出来 | 原样留在待整理目录，下次再试；不会硬猜 |
-| 剧集没有季集号 | 不动，避免把整季塞进 S01E01 |
-| 非视频文件 | 不碰（字幕/图片/nfo 留在原地） |
-| 移动成功但改名失败 | 记失败日志，文件在目标目录里，手动改个名即可 |
-
-建议第一次：开「只预演」→ 点「预演」→ 看清单 → 挑一个不重要的片子关掉预演跑一遍 → 没问题再全量。
-
-### AI 兜底
-
-只在你**开了开关且 TMDB 没认出来**时调用，发出去的内容只有文件名和所在目录，不含 Cookie、路径映射或账号信息。
-
-```yaml
-接口：https://api.deepseek.com/v1   # 任意 OpenAI 兼容都行
-模型：deepseek-chat
-```
-
-返回必须是 JSON：`{"title": "...", "year": 2024, "kind": "movie|tv", "season": 1, "episode": 2, "confidence": 0.9}`。
-置信度低于 0.6 且 TMDB 也搜不到时，仍然按「没认出来」处理，不会瞎改。
-
-### 企业微信里发链接
-
-#### 1. 建自建应用
-
-企业微信管理后台 → 应用管理 → 自建 → 创建应用 → 记下 `AgentId`、`Secret`，企业信息里拿 `CorpID`。这三个填到「设置 → 通知（企业微信）」。
-
-#### 2. 开接收消息
+### 2. 开接收消息
 
 应用详情 → 接收消息 → 设置 API 接收：
 
@@ -382,47 +319,19 @@ curl -X POST "http://NAS:999/api/hook?token=p302_xxx&full=1"
 
 企业微信会立刻发一个 GET 校验，plex302 用 Token 验签 + AES 解密后原样返回 `echostr`，通过即保存成功。
 
-> 回调地址必须**公网可达**。如果 plex302 只在局域网，用反代/内网穿透把 `/api/wecom/callback` 暴露出去即可，不需要暴露整个后台。
+> 回调地址必须**公网可达**。如果 plex302 只在局域网，用反代 / 内网穿透把 `/api/wecom/callback` 暴露出去即可，不需要暴露整个后台。
 
-#### 3. 用法
+### 3. 用法
 
 在微信里（企业微信绑定微信后，直接从微信的「企业微信」会话进）给这个应用发：
 
 | 发什么 | 效果 |
 |---|---|
-| `https://115.com/s/xxxx?password=abcd` | 转存到待整理，20 秒后自动整理 |
-| `magnet:?xt=urn:btih:...` / `ed2k://...` | 115 离线下载到待整理 |
-| `预演` | 只出整理清单，不动文件 |
-| `整理` | 真整理，完成后把清单发回来 |
-| `状态` | 最近一次整理 / 事件 / 目录监听结果 |
+| `https://115.com/s/xxxx?password=abcd` | 转存到入库目录 |
+| `magnet:?xt=urn:btih:...` / `ed2k://...` | 115 离线下载到入库目录 |
+| `状态` | 最近的事件 / 目录监听结果 |
 
-重活都在后台线程跑，企业微信 5 秒超时不会卡住；结果用应用消息推回来。
-
-### 代理
-
-TMDB 和 AI 在境外，115 在境内，所以代理是**分开**的：
-
-```text
-metadata.proxy  →  只给 TMDB / AI 用
-115 接口         →  永远直连（走代理反而更容易 405）
-企业微信          →  notify.wecom_proxy（可选）
-```
-
-填 `http://192.168.1.2:7890` 或 `socks5://...`（requests 的 socks 需要额外依赖，建议用 http 代理）。
-如果 TMDB 直连不通又不想挂代理，也可以把 `metadata.tmdb_base` 换成可用的镜像地址。
-
-### 和 CMS 怎么选
-
-| | CMS | plex302 自建整理 |
-|---|---|---|
-| 定位 | 生成 strm + Emby 入库 | 真实文件 + Plex 302，不生成 strm |
-| 识别 | 自带识别 + OpenAI 辅助 | TMDB + AI 兜底 |
-| 整理完成通知 | 没有对外 webhook，只有企微/TG 通知 | 不需要通知：整理后自己扫库 |
-| 洗版/多版本 | 有 | 只有「目标存在则跳过 / 覆盖」两档 |
-| 字幕配套 | 会整理字幕 | 暂不搬字幕（留在原地） |
-| 依赖 | 要 Emby + strm 目录 | 只要 115 Cookie + Plex |
-
-如果你只想「真实文件入库 + 302 + 自动整理」，现在可以只跑 plex302；如果还要洗版策略、字幕配套、多版本共存，CMS 仍然更成熟，两者也可以并存——CMS 整理完，115 事件照样会触发 plex302 扫库。
+重活在后台线程跑，企业微信 5 秒超时不会卡住；结果用应用消息推回来。
 
 ---
 
@@ -505,27 +414,12 @@ Plex302 · 增量入库完成
 | `notify.on_scan` | `true` | 增量入库通知 |
 | `notify.on_full` | `true` | 全量通知 |
 | `notify.on_error` | `true` | 错误通知 |
-| `organize.enabled` | `false` | 自建整理总开关 |
-| `organize.dry_run` | `true` | 只预演，不动文件（强烈建议先开） |
-| `organize.source_dirs` | `[]` | 待整理目录（115 云盘绝对路径） |
-| `organize.movie_dir` / `tv_dir` | 空 | 电影 / 剧集归档目录 |
-| `organize.movie_template` | `{title} ({year})/{title} ({year})` | 电影命名模板 |
-| `organize.tv_template` | `.../Season {season:02d}/... - S{season:02d}E{episode:02d}` | 剧集命名模板 |
-| `organize.min_size_mb` | `100` | 小于这个值当样片跳过 |
-| `organize.depth` | `2` | 待整理目录往下扫几层 |
-| `organize.overwrite` | `false` | 目标存在时是否覆盖 |
-| `organize.delay` | `0.8` | 每个文件之间的间隔（秒，防 115 风控） |
-| `metadata.tmdb_key` | 空 | TMDB API Key |
-| `metadata.tmdb_base` | `https://api.themoviedb.org/3` | 可换镜像 |
-| `metadata.proxy` | 空 | TMDB / AI 的 HTTP 代理（115 不走） |
-| `ai.enabled` | `false` | TMDB 失败时是否问 AI |
-| `ai.base` / `model` | DeepSeek | 任意 OpenAI 兼容接口 |
 | `ingest.enabled` | `false` | 链接入库总开关 |
 | `ingest.target_dir` | 空 | 转存 / 离线的目标目录 |
 | `ingest.wecom_token` | 空 | 企业微信回调 Token |
 | `ingest.wecom_aes_key` | 空 | 企业微信 EncodingAESKey（43 位） |
 | `ingest.allow_users` | 空 | 允许使用的成员 UserID，留空=全部 |
-| `security.emby_token` | 自动生成 | CMS 的 `EMBY_API_KEY` |
+| `security.emby_token` | 自动生成 | `/emby` 入口的 `api_key` |
 | `security.webhook_token` | 自动生成 | Webhook token |
 | `u115.cookie` | 空 | 115 网页 Cookie（直链 + 事件） |
 | `u115.recent_enabled` | `true` | 最近文件兜底 |
@@ -548,7 +442,7 @@ Plex302 · 增量入库完成
 
 **Q：为什么设置里看不到静置时间、拉取条数了？**
 
-按 115 的风控节奏固定好了（90 秒 / 10 分钟 / 3 分钟 / 100 条 / 0.6 秒间隔），不需要调。真要改可以编辑 `config.json` 里的 `events` 段。
+按 115 的风控节奏固定好了（90 秒 / 10 分钟 / 3 分钟 / 100 条），不需要调。所有 115 请求由统一闸门控制：后台任务（事件、入库、目录操作）**任意两次至少隔 2.05 秒**——比 CMS 默认的 2.0 秒只慢不快；直链解析有目录缓存（10 分钟）和 pick_code 缓存（30 分钟），走独立通道，不会拖慢起播。
 
 **Q：怎么确认 302 生效了？**
 
@@ -639,17 +533,12 @@ app/
   providers.py       直链来源：115 Cookie / CD2 / AList / 自定义
   resolver.py        路径映射 + 局域网判断 + 直链缓存
   u115ops.py         115 写操作：建目录 / 移动 / 改名 / 转存 / 离线
-  organize.py        自建整理：文件名解析 + TMDB + 规划 + 执行
-  tmdb.py            TMDB 搜索与打分
-  ai.py              AI 兜底识别（OpenAI 兼容）
   ingest.py          115 分享 / 磁力 / ed2k 入库
   wecom.py           企业微信回调：验签 + AES 解密 + 指令分发
-  net.py             出站 HTTP（支持代理）
 nginx/
   plex302.js         njs：拦截 /library/parts、decision 改写、302 或回源
 tests/mock_plex.py   假 Plex + 假 CDN
 tests/mock_115.py    假 115 webapi（事件 + 目录 + 直链 + 写操作 + 转存）
-tests/mock_tmdb.py   假 TMDB（整理链路测试）
 ```
 
 ---
@@ -667,7 +556,7 @@ tests/mock_tmdb.py   假 TMDB（整理链路测试）
 | 目录监听自动入库 | 监控 strm | ✅ 监控 CD2 真实目录（默认关） |
 | strm 生成 / 监控 | ✅ | ❌ 不需要 |
 | 115 秒传 | ✅ | ❌ 与入库无关 |
-| 自动重命名 / 写 NFO | ✅ | ✅ 重命名归档；NFO 交给 Plex |
+| 自动重命名 / 写 NFO | ✅ | ❌ 交给 CMS / 其它工具 |
 | 微信通知 | ✅ | ✅ 企业微信应用消息 |
 | WebUI | Vue | 原生 JS（无构建，双主题） |
 
@@ -680,9 +569,8 @@ tests/mock_tmdb.py   假 TMDB（整理链路测试）
 - 同一个 115 Cookie 被网页端重新登录挤掉时需要重贴（一般不会）。
 - CD2 缓存刷新是“尽力而为”，失败只记日志，不阻塞扫描。
 - 事件接口偶发空返回，程序会重试并保留游标，极端情况靠每日全量补。
-- 自建整理只处理视频：字幕、海报、nfo 不跟着搬（留在待整理目录）。
-- 115 的写接口（建目录 / 移动 / 改名 / 转存 / 离线）按网页版公开接口实现，只在假 115 上验证过；第一次务必开预演、挑一个小样本跑通再全量。
-- 整理没有洗版策略和多版本共存，只有「目标存在跳过 / 覆盖」；需要这些还是用 CMS。
+- 不内置整理：改名 / 归档 / 洗版交给 CMS 或其它工具，本项目只负责 302、增量扫库和链接转存。
+- 115 的写接口（建目录 / 转存 / 离线）按网页版公开接口实现，只在假 115 上验证过；第一次先拿一个小分享试。
 - 115 分享转存受账号空间和会员权益限制；磁力离线受 115 离线额度限制。
 - 企业微信回调要求公网可达，纯内网部署需要自己做反代或内网穿透。
 - CD2 目录监听会持续打 115 接口，**默认关闭**。

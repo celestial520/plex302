@@ -30,9 +30,7 @@ def parse_links(text: str) -> List[Dict[str, str]]:
     return out
 
 
-def ingest(
-    text: str, cfg: Optional[Dict[str, Any]] = None, auto_organize: bool = True
-) -> Dict[str, Any]:
+def ingest(text: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = cfg or config.load()
     ing = cfg["ingest"]
     if not ing.get("enabled"):
@@ -54,12 +52,10 @@ def ingest(
             results.append(_share(cfg, link, cid))
         else:
             results.append(_offline(cfg, link, cid))
-        time.sleep(0.6)
+        time.sleep(u115web.API_GAP)  # 115 风控：两条链接之间也按 2 秒节奏
 
     ok_count = sum(1 for x in results if x.get("ok"))
     summary: Dict[str, Any] = {"ok": ok_count > 0, "target": target, "results": results}
-    if ok_count and auto_organize and cfg["organize"].get("enabled"):
-        summary["organize_hint"] = "落盘后到「一键整理」点一次预演/整理即可"
     logger.info(f"[入库] {ok_count}/{len(results)} 条链接已提交到 {target}")
     return summary
 

@@ -11,7 +11,6 @@
     sections: [],
     scans: [],
     events: [],
-    organize: null,
     tab: 'overview',
     timers: {},
   };
@@ -25,7 +24,7 @@
   };
 
   const TITLES = {
-    overview: ['概览', '外网 302、115 事件增量入库、自建整理、每天全量兜底。'],
+    overview: ['概览', '外网 302、115 事件增量入库、每天全量兜底。'],
     library: ['媒体库与整理', '链接入库、TMDB 识别改名归档，以及 Plex 媒体库路径与扫描。'],
     scans: ['扫描记录', '局部扫描与全量同步的入队、执行结果和失败原因。'],
     settings: ['设置', '连接、路径映射、直链方式、自动入库、通知与安全。'],
@@ -134,7 +133,7 @@
     if (location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab);
     if (tab === 'settings' && state.config) renderSettings();
     if (tab === 'logs') loadLogs();
-    if (tab === 'library') { renderLibraries(); loadOrganize(); }
+    if (tab === 'library') renderLibraries();
     if (tab === 'scans') loadScans();
   }
 
@@ -244,14 +243,7 @@
         : (evSummary.first_run ? '已记录游标，等待新事件'
           : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')),
         !!ev.cookie_set && evSummary.ok !== false, '#i-events'],
-      ['自建整理', (s.organize && s.organize.enabled)
-        ? (s.organize.running ? '正在整理…'
-          : (s.organize.summary && s.organize.summary.at
-            ? `上次 ${fmtTime(s.organize.summary.at)} · 完成 ${s.organize.summary.done || 0} / 失败 ${s.organize.summary.failed || 0}`
-            : '已启用 · 还没跑过'))
-        : '未启用（媒体库 → 一键整理）',
-        (s.organize && s.organize.enabled) ? (s.organize.running ? true : (s.organize.summary && s.organize.summary.at ? !s.organize.summary.failed : 'idle')) : 'idle', '#i-plus'],
-      ['链接入库', (s.ingest && s.ingest.enabled) ? `已启用 · 转存到 ${s.ingest.target || '待整理'}` : '未启用（企业微信发链接）', (s.ingest && s.ingest.enabled) ? true : 'idle', '#i-link'],
+      ['链接入库', (s.ingest && s.ingest.enabled) ? `已启用 · 转存到 ${s.ingest.target || '未设置'}` : '未启用（企业微信发链接）', (s.ingest && s.ingest.enabled) ? true : 'idle', '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
       ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
@@ -388,64 +380,6 @@
   }
 
   // ------------------------------------------------------------------ 媒体库
-  // ------------------------------------------------------------------ 整理
-  function orgStatusText(row) {
-    if (row.action === 'done') return ['已整理', 'ok'];
-    if (row.action === 'move') return ['待整理（预演）', 'idle'];
-    if (row.action === 'skipped_target') return ['目标已存在', 'idle'];
-    if (row.action === 'failed') return ['失败', 'bad'];
-    if (row.reason && row.reason.indexOf('没认出来') >= 0) return ['未识别', 'idle'];
-    return ['跳过', 'idle'];
-  }
-
-  function renderOrganize(summary) {
-    const box = $('#org-summary');
-    const body = $('#org-body');
-    if (!box || !body) return;
-    if (!summary) {
-      box.textContent = '还没有跑过。先在「设置 → 识别与整理」填 TMDB Key 和目录。';
-      body.innerHTML = '<tr><td colspan="3"><div class="empty">暂无整理结果</div></td></tr>';
-      return;
-    }
-    box.innerHTML = `${summary.dry_run ? '预演' : '执行'}完成：计划 <b>${summary.planned || 0}</b> · 完成 <b>${summary.done || 0}</b>
-      · 跳过 ${summary.skipped || 0} · 失败 ${summary.failed || 0} · 耗时 ${summary.elapsed || 0}s`;
-    const items = summary.items || [];
-    body.innerHTML = items.length ? items.map((row) => {
-      const [text, tone] = orgStatusText(row);
-      const target = row.target_path || row.reason || '';
-      return `<tr>
-        <td data-label="原文件">${esc(row.source_name || row.source_path || '')}</td>
-        <td data-label="目标">${esc(target)}</td>
-        <td data-label="状态"><span class="pill ${tone}">${esc(text)}</span></td>
-      </tr>`;
-    }).join('') : '<tr><td colspan="3"><div class="empty">没有需要整理的文件</div></td></tr>';
-  }
-
-  async function loadOrganize() {
-    try {
-      const res = await api('/api/organize/status');
-      state.organize = res.data;
-      renderOrganize(res.data.summary);
-    } catch (err) { /* 后端未启用时静默 */ }
-  }
-
-  async function runOrganize(dry, btn) {
-    if (btn) btn.disabled = true;
-    const tips = dry ? '正在预演（不会动文件）…' : '正在整理，文件多时会慢一些…';
-    toast(tips, 'ok');
-    try {
-      const res = await api('/api/organize/run', { method: 'POST', body: { dry_run: dry } });
-      renderOrganize(res.data);
-      toast(dry ? '预演完成' : `整理完成：${res.data.done || 0} 个`, 'ok');
-      loadScans();
-      loadAll(true);
-    } catch (err) {
-      toast(err.message || '整理失败', 'bad');
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
   async function submitIngest(btn) {
     const el = $('#ingest-text');
     const out = $('#ingest-result');
@@ -580,7 +514,8 @@
       <label class="switch"><input type="checkbox" id="${id}" ${checked ? 'checked' : ''}><i></i></label></div>`;
   }
   function section(title, desc, body, single) {
-    return `<div class="form-section"><div class="form-section-head"><h3>${esc(title)}</h3><p>${desc}</p></div>
+    const head = desc ? `<p>${desc}</p>` : '';
+    return `<div class="form-section"><div class="form-section-head"><h3>${esc(title)}</h3>${head}</div>
       <div class="form-body ${single ? 'single' : ''}">${body}</div></div>`;
   }
 
@@ -620,7 +555,6 @@
       </div>`).join('');
 
     const u115 = (state.status && state.status.u115) || {};
-    const embyToken = (c.security && c.security.emby_token) || '';
     const html = `
       ${section('外观', '自动跟随系统，也可以固定浅色 / 深色。只保存在当前浏览器。', `
         <div class="field full">
@@ -711,50 +645,11 @@
         </div>
       `, true)}
 
-      ${section('识别与整理（TMDB / AI）', '自己整理：把待整理目录里的真实文件按 TMDB 识别结果改名归档，再通知 Plex 扫库。默认只预演，不动文件。', `
+      ${section('链接入库（企业微信）', '把 115 分享 / 磁力 / ed2k 发到企业微信，自动转存到指定目录。', `
         <div class="field full">
-          ${switchLine('启用自建整理', '扫描待整理目录 → TMDB 识别 → 在 115 上移动+改名', 'cfg-org-enabled', c.organize.enabled)}
-          ${switchLine('只预演，不真的动文件', '强烈建议先开着跑几次，确认目标路径都对再关掉', 'cfg-org-dry', c.organize.dry_run)}
-          ${switchLine('目标已存在时覆盖', '关闭时同名文件直接跳过，避免洗版误删', 'cfg-org-overwrite', c.organize.overwrite)}
+          ${switchLine('启用链接入库', '接收 115 分享链接、磁力、ed2k，自动转存', 'cfg-ingest-enabled', c.ingest.enabled)}
         </div>
-        <div class="field full"><label>待整理目录（115 云盘路径，逗号分隔）</label>
-          ${input('cfg-org-sources', (c.organize.source_dirs || []).join(', '), '/待整理, /下载/电影')}
-          <span class="desc">只扫这些目录（含子目录，深度 ${esc(c.organize.depth)} 层）。字幕、图片不会被搬走。</span></div>
-        <div class="field"><label>电影归档目录</label>${input('cfg-org-movie-dir', c.organize.movie_dir, '/媒体/电影')}</div>
-        <div class="field"><label>剧集归档目录</label>${input('cfg-org-tv-dir', c.organize.tv_dir, '/媒体/剧集')}</div>
-        <div class="field"><label>电影命名模板</label>${input('cfg-org-movie-tpl', c.organize.movie_template, '{title} ({year})/{title} ({year})')}
-          <span class="desc">可用：<code>{title}</code> <code>{year}</code>；扩展名自动保留。</span></div>
-        <div class="field"><label>剧集命名模板</label>${input('cfg-org-tv-tpl', c.organize.tv_template, '{title} ({year})/Season {season:02d}/{title} ({year}) - S{season:02d}E{episode:02d}')}
-          <span class="desc">可用：<code>{season:02d}</code> <code>{episode:02d}</code>，Plex 官方推荐这种写法。</span></div>
-        <div class="field"><label>最小体积（MB）</label>${input('cfg-org-minsize', c.organize.min_size_mb, '100', 'number')}<span class="desc">小于这个值的视频当作样片跳过。</span></div>
-        <div class="field"><label>扫描深度</label>${input('cfg-org-depth', c.organize.depth, '2', 'number')}<span class="desc">待整理目录往下找几层，2 层够大多数资源包。</span></div>
-        <div class="field"><label>TMDB API Key</label>${input('cfg-tmdb-key', '', c.metadata.tmdb_key_set ? '已保存，留空不修改' : 'themoviedb.org → 设置 → API → API Key', 'password')}
-          <span class="desc">免费申请。国内直连不了就填下面的代理，或把 TMDB 地址换成镜像。</span></div>
-        <div class="field"><label>TMDB 地址</label>${input('cfg-tmdb-base', c.metadata.tmdb_base, 'https://api.themoviedb.org/3')}</div>
-        <div class="field"><label>TMDB 语言</label>${input('cfg-tmdb-lang', c.metadata.tmdb_lang, 'zh-CN')}</div>
-        <div class="field"><label>出站代理（TMDB / AI 用）</label>${input('cfg-outbound-proxy', c.metadata.proxy, 'http://192.168.1.2:7890')}
-          <span class="desc">只给 TMDB 和 AI 走；115 接口必须直连，不走这里。</span></div>
-        <div class="field full"><div class="field-row"><button class="btn sm" id="btn-tmdb-test">测试 TMDB</button><span class="desc" id="tmdb-test-result"></span></div></div>
-        <div class="field full">
-          ${switchLine('TMDB 认不出时调用 AI', '只把失败的文件名发给模型，让它判断片名/季集', 'cfg-ai-enabled', c.ai.enabled)}
-        </div>
-        <div class="field"><label>AI 接口地址</label>${input('cfg-ai-base', c.ai.base, 'https://api.deepseek.com/v1')}</div>
-        <div class="field"><label>AI 模型</label>${input('cfg-ai-model', c.ai.model, 'deepseek-chat')}</div>
-        <div class="field"><label>AI Key</label>${input('cfg-ai-key', '', c.ai.key_set ? '已保存，留空不修改' : 'DeepSeek / 任意 OpenAI 兼容 Key', 'password')}</div>
-        <div class="field"><label>&nbsp;</label><button class="btn sm" id="btn-ai-test">测试 AI</button><span class="desc" id="ai-test-result"></span></div>
-        <div class="field full">
-          <div class="callout info">
-            整理只做三件事：<b>建目录</b>、<b>移动文件</b>、<b>重命名</b>。不动视频内容，不生成 STRM，不下载。
-            认不出来的文件留在原地，下次再试；目标已存在默认跳过。
-          </div>
-        </div>
-      `)}
-
-      ${section('链接入库（企业微信）', '把 115 分享 / 磁力 / ed2k 发到企业微信，自动转存到待整理目录，然后跑整理。', `
-        <div class="field full">
-          ${switchLine('启用链接入库', '接收 115 分享链接、磁力、ed2k，存进待整理目录', 'cfg-ingest-enabled', c.ingest.enabled)}
-        </div>
-        <div class="field"><label>入库目录</label>${input('cfg-ingest-target', c.ingest.target_dir, '/待整理')}</div>
+        <div class="field"><label>入库目录</label>${input('cfg-ingest-target', c.ingest.target_dir, '')}</div>
         <div class="field"><label>允许的成员 UserID（可选）</label>${input('cfg-ingest-users', c.ingest.allow_users, 'zhangsan,lisi')}
           <span class="desc">留空 = 应用可见范围内所有人都能用。</span></div>
         <div class="field full"><label>企业微信回调地址</label>
@@ -767,12 +662,12 @@
           <div class="callout warn">
             企业微信要求回调地址<b>公网可达</b>（HTTPS 或 80 端口）。手机微信里给这个应用发消息也能用：
             企业微信绑定微信后，消息会进同一个会话。<br>
-            指令：直接发链接 → 转存；发「预演」→ 看整理计划；发「整理」→ 真整理；发「状态」→ 看最近结果。
+            指令：直接发链接 → 转存；发「状态」→ 看最近结果。
           </div>
         </div>
       `)}
 
-      ${section('增量入库（115 操作事件）', 'CMS 整理完 → 115「最近操作」出现事件 → 静置合并 → 局部扫描。这里是主通道，比轮询目录可靠得多。', `
+      ${section('增量入库（115 操作事件）', '115 里上传 / 移动 / 改名 → 「最近操作」出现事件 → 静置合并 → 局部扫描。主通道，比轮询目录可靠。', `
         <div class="field full">
           ${switchLine('启用 115 操作事件监听', '定时拉取上传 / 移动 / 改名 / 复制 / 删除流水，有新视频就局部扫描', 'cfg-events-enabled', c.events.enabled)}
           ${switchLine('首次运行也补扫历史', '默认只记录游标，不补扫历史，避免一装好就扫全库', 'cfg-events-first', c.events.first_scan)}
@@ -787,7 +682,7 @@
             · 同一目录静置 <b>90 秒</b> 再扫，期间每来一个新事件就重新计时（整理没停就一直等）<br>
             · 单目录最多等 <b>10 分钟</b>，避免一直有事件就永远不扫<br>
             · 扫完 <b>3 分钟</b> 后复核一次，接住晚落盘的字幕 / 花絮<br>
-            · 每次拉 100 条、最多翻 5 页，每条事件之间留 0.6 秒，降低风控概率
+            · 每次拉 100 条、最多翻 5 页；任意两次 115 请求至少隔 <b>2.05 秒</b>（和 CMS 的 2 秒对齐）
           </div>
         </div>
       `, true)}
@@ -817,44 +712,23 @@
         <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。</div></div>
       `)}
 
-      ${section('通知（企业微信）', '和 115 秒传助手用同一套应用消息：CorpID + Secret + AgentID + 接收人，可选代理。', `
-        <div class="field full">${switchLine('启用企业微信通知', '增量入库、全量结果、Cookie 失效都会推送', 'cfg-wecom-enabled', c.notify.wecom_enabled)}</div>
-        <div class="field"><label>CorpID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, '企业微信 → 我的企业 → 企业ID')}</div>
-        <div class="field"><label>AgentID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '应用详情里的 AgentId')}</div>
-        <div class="field"><label>Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '应用详情里的 Secret', 'password')}</div>
-        <div class="field"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all')}<span class="desc">成员账号用竖线分隔，默认全体。</span></div>
-        <div class="field full"><label>代理地址（可选）</label>${input('cfg-wecom-proxy', c.notify.wecom_proxy, 'http://proxy:8980')}<span class="desc">企业微信 API 的转发地址，只换 host、路径不变。</span></div>
-        <div class="field full">
-          ${switchLine('增量入库通知', '一轮事件扫描结束后汇总成一条（含目录、媒体库、来源），避免刷屏', 'cfg-notify-scan', c.notify.on_scan)}
-          ${switchLine('全量同步通知', '全量结束发一条汇总', 'cfg-notify-full', c.notify.on_full)}
-          ${switchLine('错误通知', 'Cookie 失效 / 拉取失败，同类 30 分钟只发一次', 'cfg-notify-error', c.notify.on_error)}
-        </div>
-        <div class="field full"><div class="field-row"><button class="btn sm" id="btn-notify-test"><svg><use href="#i-bell"></use></svg>发送测试消息</button><span class="desc" id="notify-test-result"></span></div></div>
-      `)}
-
-      ${section('CMS 对接', 'CMS 整理完到底能不能通知 plex302：能，但要看你有没有开 strm。', `
-        <div class="field full">
-          <div class="callout info">
-            <b>① 你开了 strm（CMS 生成 strm 后通知 Emby 扫库）</b><br>
-            把 CMS 的 <code>EMBY_HOST_PORT</code> 直接指向本容器，它调 <code>/emby/Library/Refresh</code> 时 plex302 就能收到：
-            <code>EMBY_HOST_PORT=http://NAS:999</code>、<code>EMBY_API_KEY=${esc(embyToken)}</code>。<br><br>
-            <b>② 你没开 strm（真实文件入库）</b><br>
-            CMS 没有通用 webhook，整理完<b>不会主动发通知</b>，这时靠上面的 115 操作事件——CMS 整理的动作本身就是事件，
-            这也是 CMS 自己增量同步用的办法。<br><br>
-            <b>③ 其它工具</b>（MoviePilot / 脚本）可以打下面这个 Webhook。
+      ${section('通知（企业微信）', '', `
+        <div class="form-rows">
+          <div class="form-row-line"><label>企业ID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, '')}</div>
+          <div class="form-row-line"><label>应用Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '', 'password')}</div>
+          <div class="form-row-line"><label>应用ID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '')}</div>
+          <div class="form-row-line"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '')}</div>
+          <div class="form-row-line"><label>API代理</label>${input('cfg-wecom-proxy', c.notify.wecom_proxy, '')}</div>
+          <div class="form-row-line"><label>状态</label>
+            <label class="switch"><input type="checkbox" id="cfg-wecom-enabled" ${c.notify.wecom_enabled ? 'checked' : ''}><i></i></label>
           </div>
         </div>
-        <div class="field full"><label>Emby 兼容地址</label>
-          <div class="field-row"><input class="input" id="cfg-emby-url" readonly value="${esc((state.status && state.status.emby_url) || '')}"><button class="btn sm" id="btn-copy-emby"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc">给 CMS / 只支持 Emby 通知的工具用；会校验 <code>api_key</code>。触发的是全量同步。</span>
-        </div>
-        <div class="field full"><label>通用 Webhook</label>
-          <div class="field-row"><input class="input" id="cfg-webhook" readonly value="${esc((state.status && state.status.webhook_url) || '')}"><button class="btn sm" id="btn-copy-hook"><svg><use href="#i-copy"></use></svg>复制</button></div>
-          <span class="desc"><code>GET ...&amp;path=/电影/xxx</code>、<code>POST {"path":"..."}</code>，或 <code>&amp;full=1</code> 直接全量。</span>
+        <div class="form-rows" style="margin-top:18px">
+          <div class="form-row-line"><span></span><button class="btn sm" id="btn-notify-test"><svg><use href="#i-bell"></use></svg>发送测试消息</button></div>
         </div>
       `, true)}
 
-      ${section('网络与安全', '局域网判断基于客户端真实 IP；如果前面还有一层反代，请确保它传了 X-Forwarded-For。', `
+      ${section('网络与安全', '判断「这个请求是不是局域网」用，决定给他 302 还是回源 Plex。', `
         <div class="field"><label>对外访问地址（可选）</label>${input('cfg-public-url', c.server.public_url, 'https://plex.example.com:32500')}
           <span class="desc">只用于显示 Webhook 地址和文档，不影响代理。</span></div>
         <div class="field"><label>允许 302 的局域网</label>
@@ -862,7 +736,7 @@
           <span class="desc">这些网段默认回源 Plex；想电视也直接连云盘，打开下面的「局域网也 302」。</span></div>
         <div class="field full">
           ${switchLine('局域网也 302', '电视 / 盒子在内网也直接从 115 拉流，NAS 完全不上行；代价是内网也要能连公网', 'cfg-redirect-lan', c.server.redirect_lan)}
-          ${switchLine('信任 X-Forwarded-For', '前面有反代/CDN 时打开；直接暴露端口时保持打开也没问题', 'cfg-trust-xff', c.server.trust_forwarded_for)}
+          ${switchLine('信任 X-Forwarded-For', '前面有 Lucky / NPM / CDN 时打开；端口直接暴露公网就关掉，防止伪造内网 IP', 'cfg-trust-xff', c.server.trust_forwarded_for)}
           ${switchLine('强制 directPlay', '拦截 Plex decision 请求并改写 directPlay=1，尽量避免服务端转码', 'cfg-force-dp', c.advanced.force_direct_play)}
         </div>
         <div class="field full">
@@ -1004,9 +878,6 @@
         out.textContent = err.message || 'Cookie 测试失败';
       }
     });
-    $('#btn-copy-hook').addEventListener('click', () => copyText($('#cfg-webhook').value));
-    const copyEmby = $('#btn-copy-emby');
-    if (copyEmby) copyEmby.addEventListener('click', () => copyText($('#cfg-emby-url').value));
     const watchRun = $('#btn-watch-run');
     if (watchRun) watchRun.addEventListener('click', () => runWatch(watchRun));
     const watchRun2 = $('#btn-watch-run-2');
@@ -1024,24 +895,6 @@
         out.textContent = '已发送，去企业微信看看';
         toast('测试消息已发送', 'ok');
       } catch (err) { out.textContent = err.message || '发送失败'; }
-    });
-    const tmdbBtn = $('#btn-tmdb-test');
-    if (tmdbBtn) tmdbBtn.addEventListener('click', async () => {
-      const out = $('#tmdb-test-result');
-      out.textContent = '测试中…';
-      try {
-        const res = await api('/api/tmdb/test', { method: 'POST', body: {} });
-        out.textContent = `OK：搜到 ${res.data.count} 条，示例《${res.data.sample}》(${res.data.year || '-'})`;
-      } catch (err) { out.textContent = err.message || 'TMDB 测试失败'; }
-    });
-    const aiBtn = $('#btn-ai-test');
-    if (aiBtn) aiBtn.addEventListener('click', async () => {
-      const out = $('#ai-test-result');
-      out.textContent = '测试中…';
-      try {
-        const res = await api('/api/ai/test', { method: 'POST', body: {} });
-        out.textContent = `OK：${res.data.result.title} / ${res.data.result.year || '-'} / ${res.data.result.kind}`;
-      } catch (err) { out.textContent = err.message || 'AI 测试失败'; }
     });
     const copyWecom = $('#btn-copy-wecom');
     if (copyWecom) copyWecom.addEventListener('click', () => copyText($('#cfg-wecom-callback').value));
@@ -1125,39 +978,9 @@
     if (val('cfg-wecom-secret')) c.notify.wecom_secret = val('cfg-wecom-secret');
     c.notify.wecom_touser = val('cfg-wecom-touser') || '@all';
     c.notify.wecom_proxy = val('cfg-wecom-proxy');
-    c.notify.on_scan = checked('cfg-notify-scan');
-    c.notify.on_full = checked('cfg-notify-full');
-    c.notify.on_error = checked('cfg-notify-error');
 
     c.u115.recent_enabled = c.events.recent_fallback;
     if (val('cfg-115-cookie')) c.u115.cookie = val('cfg-115-cookie');
-
-    c.organize.enabled = checked('cfg-org-enabled');
-    c.organize.dry_run = checked('cfg-org-dry');
-    c.organize.overwrite = checked('cfg-org-overwrite');
-    c.organize.source_dirs = val('cfg-org-sources').split(/[,，\n]+/).map((x) => x.trim()).filter(Boolean);
-    c.organize.movie_dir = val('cfg-org-movie-dir');
-    c.organize.tv_dir = val('cfg-org-tv-dir');
-    if (val('cfg-org-movie-tpl')) c.organize.movie_template = val('cfg-org-movie-tpl');
-    if (val('cfg-org-tv-tpl')) c.organize.tv_template = val('cfg-org-tv-tpl');
-    c.organize.min_size_mb = Number(val('cfg-org-minsize')) || 0;
-    c.organize.depth = Number(val('cfg-org-depth')) || 2;
-
-    if (val('cfg-tmdb-key')) c.metadata.tmdb_key = val('cfg-tmdb-key');
-    c.metadata.tmdb_base = val('cfg-tmdb-base') || c.metadata.tmdb_base;
-    c.metadata.tmdb_lang = val('cfg-tmdb-lang') || 'zh-CN';
-    c.metadata.proxy = val('cfg-outbound-proxy');
-
-    c.ai.enabled = checked('cfg-ai-enabled');
-    c.ai.base = val('cfg-ai-base') || c.ai.base;
-    c.ai.model = val('cfg-ai-model') || c.ai.model;
-    if (val('cfg-ai-key')) c.ai.key = val('cfg-ai-key');
-
-    c.ingest.enabled = checked('cfg-ingest-enabled');
-    c.ingest.target_dir = val('cfg-ingest-target');
-    c.ingest.allow_users = val('cfg-ingest-users');
-    c.ingest.wecom_token = val('cfg-ingest-token');
-    if (val('cfg-ingest-aes')) c.ingest.wecom_aes_key = val('cfg-ingest-aes');
 
     c.server.public_url = val('cfg-public-url');
     c.server.lan_cidrs = val('cfg-lan').split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
@@ -1235,8 +1058,6 @@
       } catch (err) { toast(err.message, 'bad'); }
     });
     $('#btn-scan-refresh').addEventListener('click', loadScans);
-    $('#btn-org-preview').addEventListener('click', (e) => runOrganize(true, e.currentTarget));
-    $('#btn-org-run').addEventListener('click', (e) => runOrganize(false, e.currentTarget));
     $('#btn-ingest').addEventListener('click', (e) => submitIngest(e.currentTarget));
     $('#btn-run-watch').addEventListener('click', async () => {
       const btn = $('#btn-run-watch'); btn.disabled = true;
