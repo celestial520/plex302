@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import time
 from typing import Any, Dict, Optional
 
@@ -89,7 +90,9 @@ class EventWatcher:
             except Exception as err:  # noqa: BLE001
                 logger.error(f"[115事件] 本轮异常：{err}")
                 notify.notify_error(f"115 事件监听异常：{err}", key="events")
-            await asyncio.sleep(max(15, int(cfg["events"]["interval"])))
+            # 间隔加抖动：固定 60 秒整点轮询是很容易被识别的机械节奏
+            wait = max(15, int(cfg["events"]["interval"])) * random.uniform(1.0, 1.15)
+            await asyncio.sleep(wait)
 
     async def _tick_loop(self) -> None:
         """每 5 秒把到期的目录丢进扫描队列，并处理复核。"""

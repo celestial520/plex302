@@ -21,7 +21,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -253,6 +253,7 @@ async def api_status(request: Request) -> Any:
                 "cookie_set": bool(cfg["u115"].get("cookie")),
                 "enabled": cfg["events"]["enabled"],
                 "interval": cfg["events"]["interval"],
+                "risk": u115web.risk_state(),
             },
             "full": scanner.scanner.full_status(),
             "notify": {"wecom": bool(cfg["notify"]["wecom_enabled"])},

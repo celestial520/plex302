@@ -10,7 +10,7 @@ Cookie 从浏览器 F12 → Network → 任意 webapi.115.com 请求里复制，
 115 的 405 是「风控 / 登录态被临时限制」的信号，不是 HTTP 方法用错：
   - 同一份 Cookie 被 CMS 等多个工具同时高频请求、或短时间请求过密，都会触发；
   - 在别处重新登录 115 挤掉旧会话，也会返回 405。
-触发后全局退避 30 秒，避免风控窗口里继续猛打把限制加重。
+触发后全局退避：60 秒起，连续命中翻倍，最长 15 分钟，避免风控窗口里继续猛打把限制加重。
 
 两个坑（踩过）：
 1. cid 是 64 位整数，全程必须当字符串传，转成 float 会丢精度，接口直接报“服务器开小差”
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -41,12 +42,21 @@ EXPIRE_ERRNOS = {990001, 40101017, 40101019}
 # ——直链有 5~10 分钟目录缓存 + 30 分钟 pick_code 缓存，实际很少打 115。
 API_GAP = 2.05
 FAST_GAP = 0.35
-RISK_COOLDOWN = 30.0  # 收到 405 后暂停所有 115 请求，等风控窗口过去
+# 405 风控退避：第一次 60 秒，连续命中翻倍，最长 15 分钟；半小时没再命中就重置。
+# 保守的原因：CMS 用同一份 Cookie，plex302 不能把它那份额度也吃掉。
+RISK_COOLDOWN = 60.0
+RISK_COOLDOWN_MAX = 900.0
+RISK_RESET_AFTER = 1800.0
+RISK_WAIT_CAP = 120.0  # 单次最多睡这么久，避免后台任务被挂太久
+# 请求间隔加 0~20% 抖动：恒定 2.05 秒的机械节奏本身就是风控特征
+GAP_JITTER = 0.2
 
 _pace_lock = threading.Lock()
 _last_call = 0.0
 _risk_lock = threading.Lock()
 _risk_until = 0.0
+_risk_streak = 0
+_risk_last_hit = 0.0
 
 RISK_HINT = (
     "115 触发风控（405），不是 Cookie 失效：请暂停 CMS 等共用同一 Cookie 的工具，"
@@ -54,24 +64,44 @@ RISK_HINT = (
 )
 
 
-def _risk_mark() -> None:
-    """标记进入风控冷却，之后所有 115 请求统一退避。"""
-    global _risk_until
+def _risk_mark() -> float:
+    """标记进入风控冷却，之后所有 115 请求统一退避。
+
+    连续命中时冷却时间翻倍（60s → 120s → … → 900s），把风控窗口完全让出去；
+    半小时内没再命中就回到第一档。
+    """
+    global _risk_until, _risk_streak, _risk_last_hit
+    now = time.monotonic()
     with _risk_lock:
-        _risk_until = max(_risk_until, time.monotonic() + RISK_COOLDOWN)
+        if now - _risk_last_hit > RISK_RESET_AFTER:
+            _risk_streak = 0
+        _risk_streak += 1
+        cool = min(RISK_COOLDOWN * (2 ** (_risk_streak - 1)), RISK_COOLDOWN_MAX)
+        cool *= random.uniform(1.0, 1.15)  # 抖动，别形成固定重试节奏
+        _risk_until = max(_risk_until, now + cool)
+        _risk_last_hit = now
+    return cool
 
 
 def _risk_wait() -> None:
     with _risk_lock:
         wait = _risk_until - time.monotonic()
     if wait > 0:
-        time.sleep(min(wait, RISK_COOLDOWN))
+        time.sleep(min(wait, RISK_WAIT_CAP))
 
 
 def risk_active() -> bool:
     """当前是否还在 405 风控冷却期内。"""
     with _risk_lock:
         return _risk_until > time.monotonic()
+
+
+def risk_state() -> Dict[str, Any]:
+    """给 WebUI 看的风控状态：冷却剩余秒数、连续命中次数。"""
+    with _risk_lock:
+        wait = max(0.0, _risk_until - time.monotonic())
+        streak = _risk_streak if wait else 0
+    return {"active": wait > 0, "wait": round(wait), "streak": streak}
 
 
 def is_risk_message(msg: str) -> bool:
@@ -82,7 +112,8 @@ def is_risk_message(msg: str) -> bool:
 
 def _pace_gap(fast: bool) -> None:
     global _last_call
-    gap = FAST_GAP if fast else API_GAP
+    jitter = GAP_JITTER * (0.25 if fast else 1.0)
+    gap = (FAST_GAP if fast else API_GAP) * random.uniform(1.0, 1.0 + jitter)
     with _pace_lock:
         wait = _last_call + gap - time.monotonic()
         if wait > 0:

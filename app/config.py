@@ -78,7 +78,7 @@ DEFAULTS: dict[str, Any] = {
         "max_entries": 200000,
         "first_run_scan": False,
         # 全量同步：把 Plex 所有媒体库整库扫一遍，作为兜底
-        "full_enabled": True,
+        "full_enabled": False,  # 每日整库全量：整库扫一遍等于让 CD2 把 115 目录全读一次，默认关
         "full_time": "04:30",
         "full_on_start": False,
         "video_exts": [
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "u115": {
         "cookie": "",
         "recent_enabled": True,
-        "recent_interval": 120,
+        "recent_interval": 300,   # 最近文件兜底间隔（事件正常时用不上，别太勤）
         "recent_limit": 50,
         "recent_first_scan": False,
     },
@@ -272,7 +272,7 @@ def normalize(cfg: dict) -> dict:
     scan["max_depth"] = _as_int(scan.get("max_depth"), 3, 1, 12)
     scan["min_size_mb"] = _as_int(scan.get("min_size_mb"), 20, 0, 1024 * 1024)
     scan["max_entries"] = _as_int(scan.get("max_entries"), 200000, 1000, 5000000)
-    scan["full_enabled"] = _as_bool(scan.get("full_enabled"), True)
+    scan["full_enabled"] = _as_bool(scan.get("full_enabled"), False)
     scan["full_on_start"] = _as_bool(scan.get("full_on_start"), False)
     full_time = str(scan.get("full_time") or "04:30").strip()
     try:
@@ -318,7 +318,7 @@ def normalize(cfg: dict) -> dict:
     u115["cookie"] = "; ".join(p.strip() for p in cookie.split(";") if p.strip() and "=" in p)
     u115["recent_enabled"] = _as_bool(u115.get("recent_enabled"), True)
     u115["recent_first_scan"] = _as_bool(u115.get("recent_first_scan"), False)
-    u115["recent_interval"] = _as_int(u115.get("recent_interval"), 120, 30, 3600)
+    u115["recent_interval"] = _as_int(u115.get("recent_interval"), 300, 60, 3600)
     u115["recent_limit"] = _as_int(u115.get("recent_limit"), 50, 5, 200)
 
     events = cfg["events"]

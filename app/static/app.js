@@ -240,9 +240,12 @@
       ['Plex 服务器', plex.ok ? `v${plex.version || ''} · ${plex.name || ''}` : (plex.error || '未连接'), plex.ok, '#i-play'],
       ['115 直链（Cookie）', u115.cookie_set ? 'Cookie 已配置 · 外网 / 内网 302 可用' : '未配置 Cookie，全部回源 Plex', !!u115.cookie_set, '#i-link'],
       ['115 操作事件', !ev.cookie_set ? '未配置 Cookie（设置 → 115 授权）'
-        : (evSummary.first_run ? '已记录游标，等待新事件'
-          : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')),
-        !!ev.cookie_set && evSummary.ok !== false, '#i-events'],
+        : ((ev.risk && ev.risk.active)
+          ? `风控冷却中 ${ev.risk.wait || 0} 秒（连续 ${ev.risk.streak || 0} 次），期间不发任何 115 请求`
+          : (evSummary.first_run ? '已记录游标，等待新事件'
+            : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查'))),
+        !!(ev.cookie_set && !(ev.risk && ev.risk.active) && evSummary.ok !== false), '#i-events'],
+      ['115 请求预算', `${s.u115_calls_today || 0} 次 / 今日（与 CMS 共用同一 Cookie，基线约 1700 次/天）`, (s.u115_calls_today || 0) > 5000 ? false : true, '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
       ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
@@ -690,14 +693,14 @@
         </div>
       `)}
 
-      ${section('全量同步', '把 Plex 所有媒体库整库扫一遍。增量再稳也可能漏，这是最后的保险。', `
+      ${section('全量同步', '把 Plex 所有媒体库整库扫一遍。这是全套流程里最重的一步（整库扫 = CD2 把 115 目录全读一次），默认关闭；事件入库正常时一般用不上。', `
         <div class="field full">
-          ${switchLine('每天定时全量', '到点自动把所有媒体库扫一遍', 'cfg-full-enabled', c.scan.full_enabled)}
+          ${switchLine('每天定时全量', '到点自动把所有媒体库扫一遍（默认关，建议先别开）', 'cfg-full-enabled', c.scan.full_enabled)}
           ${switchLine('启动时也全量一次', '容器重启后如果今天还没跑过，补一次', 'cfg-full-start', c.scan.full_on_start)}
         </div>
         <div class="field"><label>每天几点跑</label><input class="input" id="cfg-full-time" type="time" value="${esc(c.scan.full_time || '04:30')}"></div>
         <div class="field"><label>&nbsp;</label><button class="btn sm" id="btn-full-run-settings"><svg><use href="#i-full"></use></svg>立即全量扫描</button></div>
-        <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。</div></div>
+        <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。库大时 Plex 会把整棵树重新读一遍，经 CD2 落到 115 就是成千上万次目录读取，和 CMS 抢额度，所以默认关闭。</div></div>
       `)}
 
       ${section('通知（企业微信）', '', `
