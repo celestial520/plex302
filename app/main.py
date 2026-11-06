@@ -20,7 +20,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -352,9 +352,23 @@ async def api_set_config(request: Request) -> Any:
 
 
 @app.post("/api/plex/test")
-async def api_plex_test() -> Any:
+async def api_plex_test(request: Request) -> Any:
+    """测试 Plex 连接。
+
+    body 可带 url / token，用输入框「当前值」覆盖已保存配置，只用于本次测试、
+    不落盘、不污染缓存 —— 这样改完 token 不用先点保存就能验证。
+    留空表示沿用已保存的值（输入框保存后本来就会被清空）。
+    """
     try:
-        return _ok(await asyncio.to_thread(plex.test_connection))
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    url = str(body.get("url") or "").strip().rstrip("/") or None
+    token = str(body.get("token") or "").strip() or None
+    try:
+        return _ok(await asyncio.to_thread(plex.test_connection, url, token))
     except Exception as err:  # noqa: BLE001
         return _err(str(err))
 

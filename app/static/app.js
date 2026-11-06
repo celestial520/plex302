@@ -574,7 +574,7 @@
       ${section('Plex 连接', 'Plex 的地址必须能从本容器访问。host 网络下通常是 <code>http://127.0.0.1:32400</code>。', `
         <div class="field"><label>Plex 地址</label>${input('cfg-plex-url', c.plex.url, 'http://127.0.0.1:32400')}</div>
         <div class="field"><label>X-Plex-Token</label>${input('cfg-plex-token', '', c.plex.token_set ? '已保存，留空不修改' : '在 Plex Web 的 URL 里找 X-Plex-Token', 'password')}
-          <span class="desc">获取方法：Plex Web 打开任意影片 → 查看页面源码 → 搜索 <code>X-Plex-Token</code>。</span></div>
+          <span class="desc">获取方法：Plex Web 打开任意影片 → 查看页面源码 → 搜索 <code>X-Plex-Token</code>，复制等号后面<b>连续 19~20 位</b>字符，别带 <code>X-Plex-Token=</code> 前缀、空格或引号。<b>「测试 Plex」直接用当前填写值，不必先保存</b>；测完记得点「保存」。这个 token 是临时的，改过 Plex 密码或「登出所有设备」后会作废，届时重新复制即可。</span></div>
         <div class="field full"><div class="field-row"><button class="btn sm" id="btn-test-plex">测试 Plex</button><span class="desc" id="plex-test-result"></span></div></div>
       `)}
 
@@ -889,10 +889,17 @@
     $('#btn-test-plex').addEventListener('click', async () => {
       const el = $('#plex-test-result');
       el.textContent = '测试中…';
+      const val = (id) => { const n = $('#' + id); return n ? n.value.trim() : ''; };
       try {
-        const res = await api('/api/plex/test', { method: 'POST', body: {} });
+        // 用输入框「当前值」测，不必先点保存（后端只用于本次请求，不落盘）
+        const res = await api('/api/plex/test', {
+          method: 'POST',
+          body: { url: val('cfg-plex-url'), token: val('cfg-plex-token') },
+        });
         const d = res.data;
-        el.innerHTML = `<span style="color:var(--green)">连接成功：${esc(d.friendly_name || '')} v${esc(d.version || '')}，${d.sections} 个媒体库</span>`;
+        const src = d.using_input ? '当前填写值' : '已保存配置';
+        const tip = d.using_input ? ' · 测试通过，记得点右下角「保存」' : '';
+        el.innerHTML = `<span style="color:var(--green)">连接成功（${src}）：${esc(d.friendly_name || '')} v${esc(d.version || '')}，${d.sections} 个媒体库${tip}</span>`;
       } catch (err) { el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`; }
     });
     $('#btn-test-cd2').addEventListener('click', async () => {

@@ -20,11 +20,12 @@ class PlexError(Exception):
     pass
 
 
-def _base() -> str:
-    return config.load()["plex"]["url"].rstrip("/")
+def _base(base: str | None = None) -> str:
+    return (base or config.load()["plex"]["url"]).rstrip("/")
 
 
 def _token(token: str | None = None) -> str:
+    # 空字符串同样表示「没传」，回退到已保存配置（输入框留空＝不修改）
     return (token or config.load()["plex"]["token"] or "").strip()
 
 
@@ -40,8 +41,9 @@ def request(
     token: str | None = None,
     timeout: float = 15.0,
     accept: str = "application/json",
+    base: str | None = None,
 ) -> requests.Response:
-    url = f"{_base()}{path}"
+    url = f"{_base(base)}{path}"
     headers = {"Accept": accept}
     tok = _token(token)
     if tok:
@@ -53,10 +55,37 @@ def request(
     except requests.RequestException as err:
         raise PlexError(f"连接 Plex 失败：{err}") from err
     if resp.status_code in (401, 403):
-        raise PlexError("Plex Token 无效或没有权限（HTTP 401/403）")
+        raise PlexError(_auth_error(path, resp.status_code, tok))
     if resp.status_code >= 400:
         raise PlexError(f"Plex 接口 {path} 返回 HTTP {resp.status_code}")
     return resp
+
+
+def _auth_error(path: str, status: int, tok: str) -> str:
+    """把 401/403 拆细，别再用一句「Token 无效」糊弄过去。"""
+    where = f"{path} 返回 HTTP {status}"
+    if not tok:
+        return (
+            f"未配置 X-Plex-Token（{where}）：先在「X-Plex-Token」里填入并点保存，"
+            "或从 Plex Web 影片页 → 查看页面源码 → 搜索 X-Plex-Token 重新复制整串"
+        )
+    hint_len = f"（当前 {len(tok)} 字符）"
+    if len(tok) < 16 or " " in tok or '"' in tok or "'" in tok:
+        return (
+            f"X-Plex-Token 看起来不完整{hint_len}（{where}）："
+            "Plex token 一般是 19~20 位连续字母数字，不能带空格、引号或 X-Plex-Token= 前缀，请重新复制"
+        )
+    if status == 403:
+        return (
+            f"Plex 拒绝访问{hint_len}（{where}）：token 可能有效但账号无权限。"
+            "检查①该 token 是否属于这台服务器的所有者账号；②Plex 设置 → 网络 → "
+            "「安全连接」若设为「必需」，请把 Plex 地址改成 https 或改回「首选」"
+        )
+    return (
+        f"Plex Token 无效或已失效{hint_len}（{where}）："
+        "从 Plex Web 影片页 → 查看页面源码 → 搜索 X-Plex-Token 重新复制；"
+        "若近期改过 Plex 密码或勾选过「登出已连接设备」，旧 token 会全部作废"
+    )
 
 
 def _mc(data: Any) -> Dict[str, Any]:
@@ -71,8 +100,8 @@ def _as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else [value]
 
 
-def identity() -> Dict[str, Any]:
-    resp = request("GET", "/identity", timeout=8)
+def identity(base: str | None = None, token: str | None = None) -> Dict[str, Any]:
+    resp = request("GET", "/identity", timeout=8, base=base, token=token)
     try:
         data = resp.json()
     except ValueError as err:
@@ -80,12 +109,19 @@ def identity() -> Dict[str, Any]:
     return _mc(data)
 
 
-def sections(force: bool = False, ttl: float = 300) -> List[Dict[str, Any]]:
+def sections(
+    force: bool = False,
+    ttl: float = 300,
+    base: str | None = None,
+    token: str | None = None,
+) -> List[Dict[str, Any]]:
     global _sections_cache, _sections_at
+    # 测试用的临时 url/token 不读写缓存，避免把未保存的值污染进正式缓存
+    temp = base is not None or token is not None
     with _lock:
-        if not force and _sections_cache and time.time() - _sections_at < ttl:
+        if not temp and not force and _sections_cache and time.time() - _sections_at < ttl:
             return [dict(x) for x in _sections_cache]
-    resp = request("GET", "/library/sections")
+    resp = request("GET", "/library/sections", base=base, token=token)
     try:
         data = resp.json()
     except ValueError as err:
@@ -106,9 +142,10 @@ def sections(force: bool = False, ttl: float = 300) -> List[Dict[str, Any]]:
                 "refreshing": bool(item.get("refreshing")),
             }
         )
-    with _lock:
-        _sections_cache = result
-        _sections_at = time.time()
+    if not temp:
+        with _lock:
+            _sections_cache = result
+            _sections_at = time.time()
     return [dict(x) for x in result]
 
 
@@ -119,15 +156,21 @@ def invalidate_sections() -> None:
         _sections_at = 0.0
 
 
-def test_connection() -> Dict[str, Any]:
-    info = identity()
-    secs = sections(force=True)
+def test_connection(base: str | None = None, token: str | None = None) -> Dict[str, Any]:
+    """用临时覆盖的 url/token 测连接，不落盘、不污染缓存。
+
+    base/token 为 None 时读已保存配置；前端「测试 Plex」会把输入框当前值
+    传进来，做到「所见即所测」——不必先点保存。
+    """
+    info = identity(base=base, token=token)
+    secs = sections(force=True, base=base, token=token)
     return {
         "ok": True,
         "machine_identifier": info.get("machineIdentifier", ""),
         "version": info.get("version", ""),
         "friendly_name": info.get("friendlyName", ""),
         "sections": len(secs),
+        "using_input": base is not None or token is not None,
     }
 
 

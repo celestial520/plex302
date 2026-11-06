@@ -35,6 +35,13 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages requests
           python3 tests/test_risk_405.py
 
+      - name: Plex Token 回归（测试 Plex 用输入框当前值）
+        run: |
+          set -e
+          python3 -c 'import requests' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages requests
+          python3 tests/test_plex_token.py
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -133,6 +140,18 @@ jobs:
             --data-binary @cfg2.json http://127.0.0.1:999/api/config
           echo
           sleep 4  # 等 njs 热加载 runtime.json
+
+          echo "--- 测试 Plex 用输入框当前值（不必先保存） ---"
+          # 故意传一个和已保存 token 不同的值，验证后端确实拿 body 里的值去测
+          pt=$(curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
+            -d "{\"url\":\"http://${GW}:32401\",\"token\":\"from_input_not_saved\"}" \
+            http://127.0.0.1:999/api/plex/test)
+          echo "测试 Plex 返回 $pt"
+          echo "$pt" | grep -q '"ok": *true' || { echo "::error::带当前输入值的测试 Plex 应成功"; exit 1; }
+          echo "$pt" | grep -q '"using_input": *true' || { echo "::error::应标记 using_input"; exit 1; }
+          # 再确认配置没被这次测试写脏
+          curl -s -b cookie.txt http://127.0.0.1:999/api/config | grep -q '"token_set": *true' \
+            || { echo "::error::测试不应清掉已保存 token"; exit 1; }
 
           echo "--- 外网请求应 302 到直链 ---"
           curl -s -D headers.txt -o /dev/null -H 'X-Forwarded-For: 8.8.8.8' \
