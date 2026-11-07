@@ -108,7 +108,11 @@ jobs:
           GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
           echo "网桥网关=$GW"
           python3 tests/mock_plex.py --host 0.0.0.0 --port 32401 --cdn-port 32402 &
+          # 官方接口也要一个假 115（上一个步骤起的进程随 shell 退出就没了）
+          python3 tests/mock_115.py --host 0.0.0.0 --port 32403 > /tmp/mock115-e2e.log 2>&1 &
           sleep 2
+          curl -fsS -m 5 -X POST "http://127.0.0.1:32403/open/folder/get_info" -d "path=/media/dune.mkv" \
+            | grep -q pcdune || { echo "::error::假 115 官方接口没起来"; cat /tmp/mock115-e2e.log; exit 1; }
 
           # 先确认容器能访问宿主机上的假 Plex，避免后面排错困难
           docker exec p302 curl -fsS -m 5 "http://$GW:32401/identity" > /dev/null \
@@ -161,6 +165,10 @@ jobs:
           # 再确认配置没被这次测试写脏
           curl -s -b cookie.txt http://127.0.0.1:999/api/config | grep -q '"token_set": *true' \
             || { echo "::error::测试不应清掉已保存 token"; exit 1; }
+
+          # 容器能不能到达假 115（官方接口）——不对的话后面必然回源，先给明确报错
+          docker exec p302 curl -fsS -m 5 -X POST "http://host.docker.internal:32403/open/folder/get_info" \
+            -d "path=/media/dune.mkv" || { echo "::error::容器访问不到假 115 官方接口"; exit 1; }
 
           echo "--- 外网请求应 302 到直链 ---"
           curl -s -D headers.txt -o /dev/null -H 'X-Forwarded-For: 8.8.8.8' \
