@@ -26,8 +26,9 @@ from . import logger
 
 # 复用 plex-demo 已备案的开放平台应用，用户不需要自己申请
 CLIENT_ID = "100195313"
-AUTH_HOST = "https://passportapi.115.com"
-API_HOST = "https://proapi.115.com"
+# 允许用环境变量指到别处（CI 用假服务验证整条 302 链路；也能给代理/镜像用）
+AUTH_HOST = (os.getenv("P115_OPEN_AUTH_BASE") or "https://passportapi.115.com").rstrip("/")
+API_HOST = (os.getenv("P115_OPEN_API_BASE") or "https://proapi.115.com").rstrip("/")
 QR_HOST = "https://qrcodeapi.115.com"
 
 TIMEOUT = 15

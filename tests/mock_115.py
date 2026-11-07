@@ -139,8 +139,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         path = urlparse(self.path).path
-        # /add 与 /add_event 是测试辅助接口，真实 115 没有，不校验 Cookie
-        if not self._authorized() and path not in ("/add", "/add_event"):
+        # /add 与 /add_event 是测试辅助接口；/open/* 是开放平台接口（走 Bearer token，
+        # 不认网页 Cookie）——都不校验 Cookie
+        if not self._authorized() and not path.startswith("/open/") and path not in ("/add", "/add_event"):
             body = b"<html>405</html>"
             self.send_response(405)
             self.send_header("Content-Type", "text/html")
@@ -225,6 +226,38 @@ class Handler(BaseHTTPRequestHandler):
                             {"n": item["n"], "cid": "", "fid": item["fid"], "pc": "pcshare", "s": item["s"]}
                         )
             return self._json({"state": True})
+        # ---- 115 开放平台（官方接口）：给端到端 302 用 ----
+        if path == "/open/folder/get_info":
+            body = self._body()
+            want = str(body.get("path") or "")
+            name = want.rstrip("/").split("/")[-1] or "dune.mkv"
+            if not name.lower().endswith((".mkv", ".mp4", ".ts")):
+                return self._json({"state": False, "errcode": 990001, "message": "not a file"})
+            return self._json(
+                {"state": True, "errcode": 0, "data": {"pick_code": "pcdune", "file_name": name, "size": 8 * 1024 ** 3}}
+            )
+        if path == "/open/ufile/downurl":
+            body = self._body()
+            pick = str(body.get("pick_code") or body.get("pickcode") or "")
+            if not pick:
+                return self._json({"state": False, "errcode": 990002, "message": "pick_code required"})
+            host = self.headers.get("Host") or "127.0.0.1:32403"
+            port = host.rsplit(":", 1)[-1] if ":" in host else "32403"
+            cdn = int(port) - 1 if port.isdigit() else 32402
+            # 真实 115 的 data 是以 file_id 为键的对象，每项里 url.url 才是直链
+            return self._json(
+                {
+                    "state": True,
+                    "errcode": 0,
+                    "data": {
+                        "9001": {
+                            "file_name": "dune.mkv",
+                            "file_size": 8 * 1024 ** 3,
+                            "url": {"url": f"http://{host.split(':')[0]}:{cdn}/media/dune.mkv?pick={pick}"},
+                        }
+                    },
+                }
+            )
         if path == "/offline/add_task_urls":
             form = self._read_form()
             with LOCK:
