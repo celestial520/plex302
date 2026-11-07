@@ -23,6 +23,9 @@ from . import config, logger, plex
 INDEX_FILE = config.CONFIG_DIR / "part_index.json"
 PAGE_SIZE = 500
 REBUILD_TTL = 12 * 3600.0  # 12 小时重建一次，够新了
+# v1 只扫 /all，剧集库全漏；v2 连 allLeaves / all?type=4 一起扫。
+# 升级时旧索引虽然「没过期」但覆盖不全，必须作废旧文件强制重建一次。
+INDEX_SCHEMA = 2
 
 _index: Dict[str, str] = {}
 _built_at: float = 0.0
@@ -46,6 +49,8 @@ def _load_disk() -> None:
         return
     if not isinstance(raw, dict):
         return
+    if int(raw.get("schema") or 0) != INDEX_SCHEMA:
+        return  # 旧格式覆盖不全，丢掉让启动时重建
     items = raw.get("parts")
     if isinstance(items, dict):
         _index = {str(k): _norm(v) for k, v in items.items() if k and v}
@@ -57,7 +62,7 @@ def _save_disk() -> None:
         config.ensure_dirs()
         tmp = INDEX_FILE.with_suffix(".tmp")
         tmp.write_text(
-            json.dumps({"built_at": _built_at, "parts": _index}, ensure_ascii=False),
+            json.dumps({"schema": INDEX_SCHEMA, "built_at": _built_at, "parts": _index}, ensure_ascii=False),
             encoding="utf-8",
         )
         tmp.replace(INDEX_FILE)
@@ -85,6 +90,7 @@ def state() -> Dict[str, Any]:
         "built_at": int(_built_at),
         "building": _building,
         "age": int(time.time() - _built_at) if _built_at else -1,
+        "schema": INDEX_SCHEMA,
     }
 
 
@@ -96,37 +102,68 @@ def _build() -> None:
     global _index, _built_at, _building
     started = time.time()
     fresh: Dict[str, str] = {}
+    per_lib: Dict[str, int] = {}
     try:
         secs = plex.sections(force=True)
         for sec in secs:
-            if sec.get("type") not in ("movie", "show", "episode", "clip"):
+            stype = str(sec.get("type") or "")
+            key = str(sec.get("key") or "")
+            title = str(sec.get("title") or key)
+            if stype not in ("movie", "show", "episode", "clip") or not key:
                 continue
-            start = 0
-            while True:
-                resp = plex.request(
-                    "GET",
-                    f"/library/sections/{sec['key']}/all",
-                    params={"X-Plex-Container-Start": start, "X-Plex-Container-Size": PAGE_SIZE},
-                    timeout=30,
-                )
-                try:
-                    mc = (resp.json() or {}).get("MediaContainer") or {}
-                except ValueError:
-                    logger.warn(f"[索引] 媒体库「{sec.get('title')}」返回非 JSON，跳过")
-                    break
-                items = mc.get("Metadata") or []
-                for item in items:
-                    for media in item.get("Media") or []:
-                        for part in media.get("Part") or []:
-                            pid = part.get("id")
-                            path = part.get("file")
-                            if pid and path:
-                                fresh[str(pid)] = _norm(path)
-                total = int(mc.get("totalSize") or 0)
-                start += len(items)
-                if not items or (total and start >= total):
-                    break
-                time.sleep(0.05)  # 别把 Plex 打满
+
+            # 关键坑：/library/sections/<k>/all 对「剧集库(show)」返回的是剧集
+            # (series) 列表，条目里根本没有 Media/Part —— 只扫 /all 会把全部单集
+            # 漏掉。线上就是这样只建了 127 个电影 part，播放剧集 3013 时索引
+            # 未命中，又退回会卡死的 /library/parts/<id> 查询，最终一直回源。
+            # 单集在 allLeaves 或 /all?type=4 里，两个视图都扫一遍，谁有效用谁。
+            views = [
+                (f"/library/sections/{key}/all", {}),
+                (f"/library/sections/{key}/allLeaves", {}),
+            ]
+            if stype == "show":
+                views.append((f"/library/sections/{key}/all", {"type": "4"}))
+
+            before = len(fresh)
+            for path, extra in views:
+                start = 0
+                while True:
+                    params = {
+                        "X-Plex-Container-Start": start,
+                        "X-Plex-Container-Size": PAGE_SIZE,
+                    }
+                    params.update(extra)
+                    # 单个视图失败（例如旧版 Plex 不支持 allLeaves）不能拖垮
+                    # 整个建索引流程，否则后面的媒体库全都扫不到。
+                    try:
+                        resp = plex.request("GET", path, params=params, timeout=30)
+                        mc = (resp.json() or {}).get("MediaContainer") or {}
+                    except ValueError:
+                        logger.warn(f"[索引] 媒体库「{title}」{path} 返回非 JSON，跳过该视图")
+                        break
+                    except Exception as err:  # noqa: BLE001
+                        logger.warn(f"[索引] 媒体库「{title}」{path} 读取失败，跳过该视图：{err}")
+                        break
+                    items = mc.get("Metadata") or []
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        for media in item.get("Media") or []:
+                            if not isinstance(media, dict):
+                                continue
+                            for part in media.get("Part") or []:
+                                if not isinstance(part, dict):
+                                    continue
+                                pid = part.get("id")
+                                p = part.get("file")
+                                if pid and p:
+                                    fresh[str(pid)] = _norm(p)
+                    total = int(mc.get("totalSize") or 0)
+                    start += len(items)
+                    if not items or (total and start >= total):
+                        break
+                    time.sleep(0.05)  # 别把 Plex 打满
+            per_lib[f"{title}({stype})"] = len(fresh) - before
     except Exception as err:  # noqa: BLE001
         logger.warn(f"[索引] 建 part 索引失败：{err}")
         with _lock:
@@ -139,9 +176,10 @@ def _build() -> None:
             _built_at = time.time()
             _save_disk()
         _building = False
+    detail = "、".join(f"{k}:{v}" for k, v in per_lib.items()) or "无"
     logger.info(
-        f"[索引] part 索引就绪：{len(fresh)} 个文件，耗时 {time.time() - started:.1f} 秒"
-        "（播放时按 part 直接查表，不再向 Plex 要路径）"
+        f"[索引] part 索引就绪：{len(fresh)} 个文件（分库 {detail}），"
+        f"耗时 {time.time() - started:.1f} 秒（播放时按 part 直接查表，不再向 Plex 要路径）"
     )
 
 

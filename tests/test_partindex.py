@@ -3,6 +3,10 @@
 背景：Plex 的 /library/parts/<id> 在部分版本上会 302 到媒体文件本身，
 按它取路径会把线程永久卡死（线上就是这样把线程池吃光的）。索引改为遍历
 /library/sections/<k>/all，分页读 Part.id → Part.file，播放时查表。
+
+v1.8.18 补的坑：剧集库(show) 的 /all 返回的是 series，条目里没有 Media/Part，
+只扫 /all 会把全部单集漏掉（线上只建出 127 个电影 part，剧集 3013 永远
+不命中，又退回会卡死的旧查询）。所以要连 allLeaves / all?type=4 一起扫。
 """
 from __future__ import annotations
 
@@ -54,8 +58,35 @@ PAGES = {
 }
 
 
+EMPTY = {"MediaContainer": {"totalSize": 0, "Metadata": []}}
+
+# 剧集库(show)：/all 只给 series，没有 Media/Part；单集在 allLeaves 里
+SERIES = {"MediaContainer": {"totalSize": 1, "Metadata": [{"title": "某剧", "type": "show"}]}}
+LEAVES = {
+    "MediaContainer": {
+        "totalSize": 1,
+        "Metadata": [
+            {
+                "title": "S01E01",
+                "Media": [{"Part": [{"id": 3013, "file": "/media/电视剧/日番/某剧/S01E01.mkv"}]}],
+            }
+        ],
+    }
+}
+
+
 def fake_request(method, path, **kw):
-    start = int((kw.get("params") or {}).get("X-Plex-Container-Start") or 0)
+    params = kw.get("params") or {}
+    start = int(params.get("X-Plex-Container-Start") or 0)
+    key = path.split("/library/sections/")[1].split("/")[0] if "/library/sections/" in path else ""
+    if key == "2":  # 剧集库
+        if path.endswith("/allLeaves"):
+            return R(LEAVES if start == 0 else EMPTY)
+        if str(params.get("type") or "") == "4":
+            return R(EMPTY)
+        return R(SERIES if start == 0 else EMPTY)
+    if path.endswith("/allLeaves"):  # 电影库的额外视图返回空，避免重复计数
+        return R(EMPTY)
     return R(PAGES.get(start, {"MediaContainer": {"totalSize": 3, "Metadata": []}}))
 
 
@@ -89,21 +120,36 @@ with mock.patch.object(config, "load", return_value=cfg), mock.patch.object(
 check("直接返回索引里的路径", path == "/media/电影/沙丘2.mkv", path)
 check("能映射到云盘路径", resolver.Resolver.map_path(cfg, path) == "/media/电影/沙丘2.mkv")
 
-print("=== 3) 索引没命中时触发后台重建，但本次不阻塞 ===")
+print("=== 3) 索引没命中：立刻回源，绝不再碰会卡死的 Plex part 接口 ===")
 partindex._index.clear()
 partindex._built_at = 0.0
 started = []
-with mock.patch.object(partindex, "rebuild", side_effect=lambda blocking=False: started.append(blocking)):
-    with mock.patch.object(config, "load", return_value=cfg), mock.patch.object(
-        plex, "part_file", side_effect=plex.PlexError("Plex 把 part 重定向到了媒体文件本身")
-    ), mock.patch.object(plex, "search_file", return_value=None):
-        try:
-            r._cached_part("777", token="t", uri="/library/parts/777/1/file.mkv")
-            raised = False
-        except plex.PlexError:
-            raised = True
+with mock.patch.object(partindex, "rebuild", side_effect=lambda blocking=False: started.append(blocking)), mock.patch.object(
+    config, "load", return_value=cfg
+), mock.patch.object(
+    plex, "part_file", side_effect=AssertionError("不该再调 Plex part 接口")
+) as pf, mock.patch.object(
+    plex, "search_file", side_effect=AssertionError("不该再做文件名搜索")
+) as sf:
+    try:
+        r._cached_part("777", token="t", uri="/library/parts/777/1/file.mkv")
+        raised = False
+    except plex.PlexError:
+        raised = True
 check("触发了后台重建", started == [False], started)
 check("本次失败要抛错（由上层回源）", raised)
+check("没有再调 Plex part 接口", pf.call_count == 0, pf.call_count)
+check("没有再做文件名兜底搜索", sf.call_count == 0, sf.call_count)
+
+print("=== 4) 剧集库：/all 只有 series，单集必须靠 allLeaves 收进来 ===")
+with mock.patch.object(
+    plex, "sections", return_value=[{"key": "2", "title": "日番", "type": "show"}]
+), mock.patch.object(plex, "request", side_effect=fake_request):
+    partindex._index.clear()
+    partindex._built_at = 0.0
+    partindex.rebuild(blocking=True)
+check("剧集 part 3013 被收录", partindex.lookup("3013") == "/media/电视剧/日番/某剧/S01E01.mkv", partindex.lookup("3013"))
+check("剧集库索引条数 = 1", partindex.size() == 1, partindex.size())
 
 print()
 if BAD:

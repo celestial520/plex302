@@ -246,54 +246,22 @@ class Resolver:
             ttl = config.load()["advanced"]["part_cache_ttl"]
             self.part_cache.set(part_id, from_index, ttl)
             return from_index
-        partindex.ensure()
+        # 索引没收录这个 part：绝对不要再问 /library/parts/<id>。这版 Plex 带
+        # 有效 token 会 302 到媒体文件本身，带无效 token 直接 401，两条路都拿
+        # 不到路径，还会把线程拖到超时、连 WebUI 一起卡住 —— 这正是线上「播放
+        # 从来没有成功过」的直接原因（日志里反复是「查询 Plex 文件路径超时」）。
+        # 正确做法：立刻回源（至少能播），同时强制后台重建索引，下一次起播命中。
+        partindex.rebuild()
         failed = self._part_failed.get(part_id)
         if failed and failed > time.monotonic():
-            raise plex.PlexError(f"part {part_id} 刚失败过，{int(failed - time.monotonic())} 秒内不再重试")
-        saved_token = str(config.load()["plex"].get("token") or "")
-        try:
-            path = plex.part_file(part_id, token=token or None)
-        except plex.PlexError:
-            # 客户端带来的 token 可能是「分享/受限」的，或者根本没带。
-            # 配置里那个是服务器所有者的 token，权限最高 —— 用它再试一次，
-            # 很多 401 到这一步就通了（这也是从前 302 永远失败的一个原因）。
-            if token and saved_token and token != saved_token:
-                try:
-                    path = plex.part_file(part_id, token=saved_token)
-                    logger.info(f"[302] Plex part {part_id} 用配置里的 Token 查询成功")
-                except plex.PlexError:
-                    path = ""
-            else:
-                path = ""
-
-        if not path:
-            err = plex.PlexError(f"Plex 没有返回 part {part_id} 的文件路径")
-            # 这里以前会再用文件名去 /search 兜底，但 Plex 的 part URL 里文件名
-            # 常常就是 file.mkv，搜「file」既搜不到又极慢（12 秒），还会把
-            # 线程池吃光，导致后续播放请求连排都排不上 —— 播放就这样「从来没
-            # 成功过」。现在只在文件名像真的时才兜底，并且失败要留原因。
-            logger.warn(f"[302] Plex part {part_id} 查询失败：{err}")
-            name = ""
-            m = re.match(r"^/library/parts/\d+/\d+/(.+)$", uri)
-            if m:
-                name = unquote(m.group(1)).rsplit("/", 1)[-1]
-            generic = (not name) or re.fullmatch(r"file\.[A-Za-z0-9]{1,5}", name) is not None
-            path = ""
-            if not generic:
-                path = plex.search_file(name, token=token or None) or ""
-                if not path:
-                    logger.warn(f"[302] 按文件名兜底也没找到：{name}")
-            else:
-                logger.warn(f"[302] 文件名是「{name or '空'}」，不适合做兜底搜索，直接回源")
-            if not path:
-                with self._part_fail_lock:
-                    if len(self._part_failed) > 5000:
-                        self._part_failed.clear()
-                    self._part_failed[part_id] = time.monotonic() + PART_FAIL_TTL
-                raise plex.PlexError(f"取不到 part {part_id} 的文件路径")
-        ttl = config.load()["advanced"]["part_cache_ttl"]
-        self.part_cache.set(part_id, path, ttl)
-        return path
+            raise plex.PlexError(f"part {part_id} 不在索引里（后台重建中，本次回源 Plex）")
+        with self._part_fail_lock:
+            if len(self._part_failed) > 5000:
+                self._part_failed.clear()
+            self._part_failed[part_id] = time.monotonic() + PART_FAIL_TTL
+        raise plex.PlexError(
+            f"part {part_id} 不在索引里（已触发后台重建，本次回源 Plex）：{uri or '-'}"
+        )
 
     def _resolve_start_path(self, args: Dict[str, Any], token: str) -> str:
         raw_path = self._arg(args, "path")

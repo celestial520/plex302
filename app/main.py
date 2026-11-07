@@ -23,7 +23,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.17"
+VERSION = "1.8.18"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -656,6 +656,25 @@ async def api_diag_paths() -> Any:
     return _ok({"rows": rows, "mounts": mounts, "hints": hints, "sections": len(secs)})
 
 
+@app.get("/api/diag/index")
+async def api_diag_index(part: str = "", path: str = "") -> Any:
+    """查 part 索引：这个 part 有没有收录、映射出的云盘路径是什么。
+
+    完全本地查询，不碰 Plex，所以随时可以调，不会把服务拖慢。
+    """
+    cfg = config.load()
+    out: Dict[str, Any] = {"state": partindex.state()}
+    if part:
+        hit = partindex.lookup(part)
+        out["part"] = part
+        out["found"] = bool(hit)
+        out["path"] = hit
+        out["mapped"] = resolver.Resolver.map_path(cfg, hit) if hit else None
+    if path:
+        out["mapped_from_path"] = resolver.Resolver.map_path(cfg, path)
+    return _ok(out)
+
+
 @app.get("/api/diag/part")
 async def api_diag_part(part: str = "", token: str = "") -> Any:
     """量一下「向 Plex 要文件路径」这一步：耗时、状态码、原始返回。
@@ -676,15 +695,32 @@ async def api_diag_part(part: str = "", token: str = "") -> Any:
         t0 = time.time()
 
         def _do() -> Dict[str, Any]:
+            # 绝不能跟随重定向：Plex 对 /library/parts/<id> 会 302 到媒体文件本身，
+            # 一旦跟过去就是把整部电影下载下来（这曾经把线程永久占死）。
             try:
-                resp = plex.request("GET", path, token=(token or saved) or None, timeout=20)
-                body = resp.text[:300]
-                return {
-                    "ok": True,
-                    "status": resp.status_code,
-                    "ctype": resp.headers.get("Content-Type") or "",
-                    "body_head": body,
-                }
+                resp = plex.request(
+                    "GET",
+                    path,
+                    token=(token or saved) or None,
+                    timeout=(5, 8),
+                    stream=True,
+                    allow_redirects=False,
+                )
+                try:
+                    ctype = resp.headers.get("Content-Type") or ""
+                    loc = resp.headers.get("Location") or ""
+                    body = ""
+                    if "json" in ctype or "xml" in ctype:
+                        body = (resp.raw.read(2048, decode_content=True) or b"").decode("utf-8", "ignore")
+                    return {
+                        "ok": True,
+                        "status": resp.status_code,
+                        "ctype": ctype,
+                        "location": loc,
+                        "body_head": body[:300],
+                    }
+                finally:
+                    resp.close()
             except Exception as err:  # noqa: BLE001
                 return {"ok": False, "error": f"{type(err).__name__}: {err}"}
 
