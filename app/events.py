@@ -87,7 +87,9 @@ class EventWatcher:
                     pass
 
     async def _poll_loop(self) -> None:
-        await asyncio.sleep(15)
+        # 容器刚起来时别立刻打 115：这时 CD2 正在挂载、Plex 正在扫库，
+        # 而且启动瞬间连发请求本身就是一个显眼的机器特征。随机等 40~55 秒再开始。
+        await asyncio.sleep(random.uniform(40, 55))
         while self._running:
             cfg = config.load()
             try:

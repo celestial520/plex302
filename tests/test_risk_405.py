@@ -135,7 +135,13 @@ def main() -> None:
     with mock.patch.object(u115web.requests, "get", side_effect=fake2):
         r2 = u115web.test(CFG, full=True)
     check("完整链路 recent 被风控仍判定 Cookie 可用", r2.get("ok") is True, r2.get("recent_error"))
-    check("完整链路给出风控原因", "风控" in str(r2.get("recent_error", "")))
+    check(
+        "完整链路说明最近文件被拦不影响主流程",
+        "不影响" in str(r2.get("recent_error", "")),
+        r2.get("recent_error"),
+    )
+    # 关键回归：可选接口被拦不能再触发全局退避，否则会把事件轮询一起拖停
+    check("最近文件被拦不触发全局退避", not u115web.risk_active())
 
     # 6) 风控退避确实拦住后台请求
     reset()
@@ -162,6 +168,36 @@ def main() -> None:
         except u115web.Web115Error as e:
             err = e
     check("取直链通道 405 也判风控", isinstance(err, u115web.Web115RiskError), str(err))
+
+    # 9) 反爬拦截页（405 + HTML）：只冷却该路径，不拖停别的接口
+    class HtmlResp(Resp):
+        def __init__(self) -> None:
+            super().__init__(405)
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    reset()
+    u115web._path_block.clear()
+    with mock.patch.object(u115web.requests, "get", return_value=HtmlResp()) as m:
+        err = None
+        try:
+            u115web._get(CFG, "/files/recent", {"limit": 1})
+        except u115web.Web115RiskError as e:
+            err = e
+        check("拦截页识别为路径级拦截", err is not None and "拦截" in str(err), str(err)[:40])
+        check("拦截页不触发全局退避", not u115web.risk_active())
+
+        before = m.call_count
+        try:
+            u115web._get(CFG, "/files/recent", {"limit": 1})
+        except u115web.Web115RiskError:
+            pass
+        check("冷却期内同一路径不再发请求", m.call_count == before, m.call_count)
+
+    # 别的路径照常（拦截只针对那一条路径）
+    with mock.patch.object(u115web.requests, "get", return_value=Resp(200, {"state": True, "data": []})):
+        r3 = u115web._get(CFG, "/behavior/detail", {"limit": 1})
+    check("其它路径不受影响", r3.get("state") is True)
+    u115web._path_block.clear()
 
     print()
     if BAD:

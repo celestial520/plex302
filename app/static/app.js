@@ -236,6 +236,7 @@
 
     const watch = s.watch || {};
     const full = s.full || {};
+    const blockedN = (ev.risk && ev.risk.blocked_paths) ? Object.keys(ev.risk.blocked_paths).length : 0;
     const rows = [
       ['Plex 服务器', plex.ok ? `v${plex.version || ''} · ${plex.name || ''}` : (plex.error || '未连接'), plex.ok, '#i-play'],
       ['115 直链（Cookie）', u115.cookie_set ? 'Cookie 已配置 · 外网 / 内网 302 可用' : '未配置 Cookie，全部回源 Plex', !!u115.cookie_set, '#i-link'],
@@ -243,9 +244,10 @@
         : ((ev.risk && ev.risk.active)
           ? `风控冷却中 ${ev.risk.wait || 0} 秒（连续 ${ev.risk.streak || 0} 次），期间不发任何 115 请求`
           : (evSummary.first_run ? '已记录游标，等待新事件'
-            : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查'))),
+            : (evSummary.at ? `上轮 ${evSummary.checked || 0} 条 / 待扫 ${pending}` : '等待首轮检查')))
+          + (blockedN ? ` · ${blockedN} 个可选接口被 115 拦（不影响入库）` : ''),
         !!(ev.cookie_set && !(ev.risk && ev.risk.active) && evSummary.ok !== false), '#i-events'],
-      ['115 请求预算', `${s.u115_calls_today || 0} 次 / 今日（与 CMS 共用同一 Cookie，基线约 1700 次/天）`, (s.u115_calls_today || 0) > 5000 ? false : true, '#i-link'],
+      ['115 请求预算', `${s.u115_calls_today || 0} 次 / 今日（与 CMS 共用同一 Cookie，基线约 1450 次/天）`, (s.u115_calls_today || 0) > 5000 ? false : true, '#i-link'],
       ['CloudDrive2', cd2.ok ? `${cd2.user_name || ''} · ${cd2.ready ? '就绪' : '未就绪'}` : '未连接（Token 可选，不影响 Plex 扫描）', cd2.ok ? true : 'idle', '#i-scan'],
       ['CD2 目录监听', watch.enabled === false ? '已关闭（默认，事件已覆盖）' : (watch.at ? `${watch.targets || 0} 个根目录 · 上轮入队 ${watch.queued || 0}` : '等待首轮索引'), watch.enabled === false ? 'idle' : (watch.at ? true : 'idle'), '#i-logs'],
       ['全量同步', full.running ? `正在跑 ${full.done || 0}/${full.total || 0}` : (full.finished_at ? `上次 ${fmtTime(full.finished_at)} · ${full.done || 0}/${full.total || 0} 成功` : '还没跑过'), full.running ? true : (full.finished_at ? !full.failed : 'idle'), '#i-full'],
@@ -662,6 +664,7 @@
         <div class="field full">
           ${switchLine('启用 115 操作事件监听', '定时拉取上传 / 移动 / 改名 / 复制 / 删除流水，有新视频就局部扫描', 'cfg-events-enabled', c.events.enabled)}
           ${switchLine('首次运行也补扫历史', '默认只记录游标，不补扫历史，避免一装好就扫全库', 'cfg-events-first', c.events.first_scan)}
+          ${switchLine('同时看「最近文件」（默认关）', '额外的兜底通道。115 对 /files* 拦得比别的接口严，容易被 405，且事件流水正常时基本用不上；除非你发现真的漏事件，否则别开', 'cfg-events-recent', c.events.recent_fallback)}
         </div>
         <div class="field"><label>检查间隔</label>${dur('cfg-events-interval', c.events.interval)}
           <span class="desc">多久去 115 看一次有没有新操作。填 1 分钟就够用；想更省请求可以填 5 分钟。</span></div>
@@ -1035,6 +1038,7 @@
 
     c.events.enabled = checked('cfg-events-enabled');
     c.events.first_scan = checked('cfg-events-first');
+    c.events.recent_fallback = checked('cfg-events-recent');
     c.events.interval = durValue('cfg-events-interval', 60);
 
     c.notify.wecom_enabled = checked('cfg-wecom-enabled');

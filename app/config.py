@@ -27,7 +27,7 @@ DEFAULT_MOUNT = {
 }
 
 DEFAULTS: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "plex": {
         "url": "http://127.0.0.1:32400",
         "token": "",
@@ -104,7 +104,7 @@ DEFAULTS: dict[str, Any] = {
     # 115 网页版 Cookie：开放平台没有“最近操作”接口，靠它补
     "u115": {
         "cookie": "",
-        "recent_enabled": True,
+        "recent_enabled": False,   # 最近文件兜底：115 对 /files* 拦得最严，默认关
         "recent_interval": 300,   # 最近文件兜底间隔（事件正常时用不上，别太勤）
         "recent_limit": 50,
         "recent_first_scan": False,
@@ -121,7 +121,7 @@ DEFAULTS: dict[str, Any] = {
         "verify_enabled": True,  # 扫完再复核一次，接住“扫的时候还没写完”
         "verify_delay": 180,     # 复核延迟（秒）
         "cooldown_seconds": 120, # 同一目录两次扫描的最小间隔（防事件风暴）
-        "recent_fallback": True, # 同时检查“最近文件”，兜住事件接口偶发空返回
+        "recent_fallback": False, # 同时检查“最近文件”：可选兜底，默认关（见 README 风控说明）
     },
     "notify": {
         "wecom_enabled": False,
@@ -197,7 +197,21 @@ def _norm_prefix(value: Any) -> str:
 
 def normalize(cfg: dict) -> dict:
     """把外部输入收敛成安全、可预期的结构。"""
-    cfg = _deep_merge(DEFAULTS, cfg if isinstance(cfg, dict) else {})
+    raw = cfg if isinstance(cfg, dict) else {}
+    try:
+        raw_ver = int(raw.get("version") or 1)
+    except (TypeError, ValueError):
+        raw_ver = 1
+    cfg = _deep_merge(DEFAULTS, raw)
+
+    # v1 -> v2：把「最近文件兜底」关掉。
+    # 115 对 /files* 的拦截比其它接口严得多，这个可选兜底一天只多 288 次请求，
+    # 却能换来一条 405 误报，让人误以为整号被风控。事件流水已经能覆盖入库，
+    # 所以升级时强制关一次；之后用户在设置里手动打开则尊重用户选择。
+    if raw_ver < 2:
+        cfg["events"]["recent_fallback"] = False
+        cfg["u115"]["recent_enabled"] = False
+    cfg["version"] = 2
 
     plex = cfg["plex"]
     plex["url"] = str(plex.get("url") or DEFAULTS["plex"]["url"]).strip().rstrip("/")
@@ -316,7 +330,7 @@ def normalize(cfg: dict) -> dict:
     if cookie.lower().startswith("cookie:"):
         cookie = cookie[7:].strip()
     u115["cookie"] = "; ".join(p.strip() for p in cookie.split(";") if p.strip() and "=" in p)
-    u115["recent_enabled"] = _as_bool(u115.get("recent_enabled"), True)
+    u115["recent_enabled"] = _as_bool(u115.get("recent_enabled"), False)
     u115["recent_first_scan"] = _as_bool(u115.get("recent_first_scan"), False)
     u115["recent_interval"] = _as_int(u115.get("recent_interval"), 300, 60, 3600)
     u115["recent_limit"] = _as_int(u115.get("recent_limit"), 50, 5, 200)
@@ -332,7 +346,7 @@ def normalize(cfg: dict) -> dict:
     events["verify_enabled"] = _as_bool(events.get("verify_enabled"), True)
     events["verify_delay"] = _as_int(events.get("verify_delay"), 180, 30, 3600)
     events["cooldown_seconds"] = _as_int(events.get("cooldown_seconds"), 120, 0, 3600)
-    events["recent_fallback"] = _as_bool(events.get("recent_fallback"), True)
+    events["recent_fallback"] = _as_bool(events.get("recent_fallback"), False)
 
     notify = cfg["notify"]
     notify["wecom_enabled"] = _as_bool(notify.get("wecom_enabled"), False)

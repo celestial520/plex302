@@ -47,6 +47,12 @@ FAST_GAP = 0.35
 RISK_COOLDOWN = 60.0
 RISK_COOLDOWN_MAX = 900.0
 RISK_RESET_AFTER = 1800.0
+# 反爬拦截页（405 + HTML）只针对某条路径时，单独冷却这条路径，
+# 不要把整号请求一起停掉——否则 /files 被拦会把事件轮询也拖停。
+PATH_BLOCK_TTL = 600.0
+
+_path_block: Dict[str, float] = {}
+_path_block_lock = threading.Lock()
 RISK_WAIT_CAP = 120.0  # 单次最多睡这么久，避免后台任务被挂太久
 # 请求间隔加 0~20% 抖动：恒定 2.05 秒的机械节奏本身就是风控特征
 GAP_JITTER = 0.2
@@ -61,6 +67,11 @@ _risk_last_hit = 0.0
 RISK_HINT = (
     "115 触发风控（405），不是 Cookie 失效：请暂停 CMS 等共用同一 Cookie 的工具，"
     "等 5~10 分钟再试；若刚在别处重新登录过 115，请重新复制 Cookie"
+)
+
+BLOCK_HINT = (
+    "115 反爬拦截了这个接口（HTTP 405 拦截页）。这不是 Cookie 失效，也不等于整号被封："
+    "115 对 /files* 这类高频接口单独设了更严的规则，同一份 Cookie 打别的接口往往正常。"
 )
 
 
@@ -83,6 +94,26 @@ def _risk_mark() -> float:
     return cool
 
 
+def _block_path(path: str) -> float:
+    """某条路径被判拦截：单独冷却它，返回剩余秒数。"""
+    with _path_block_lock:
+        if len(_path_block) > 64:
+            _path_block.clear()
+        until = time.monotonic() + PATH_BLOCK_TTL
+        _path_block[path] = until
+    return PATH_BLOCK_TTL
+
+
+def _path_block_left(path: str) -> float:
+    with _path_block_lock:
+        until = _path_block.get(path, 0.0)
+        left = until - time.monotonic()
+        if left <= 0:
+            _path_block.pop(path, None)
+            return 0.0
+        return left
+
+
 def _risk_wait() -> None:
     with _risk_lock:
         wait = _risk_until - time.monotonic()
@@ -101,7 +132,15 @@ def risk_state() -> Dict[str, Any]:
     with _risk_lock:
         wait = max(0.0, _risk_until - time.monotonic())
         streak = _risk_streak if wait else 0
-    return {"active": wait > 0, "wait": round(wait), "streak": streak}
+    with _path_block_lock:
+        now = time.monotonic()
+        blocked = {k: round(v - now) for k, v in list(_path_block.items()) if v > now}
+    return {
+        "active": wait > 0,
+        "wait": round(wait),
+        "streak": streak,
+        "blocked_paths": blocked,
+    }
 
 
 def is_risk_message(msg: str) -> bool:
@@ -196,10 +235,14 @@ def _get(
     base: Optional[str] = None,
     fast: bool = False,
     skip_risk: bool = False,
+    soft_risk: bool = False,
 ) -> Dict[str, Any]:
     if skip_risk:
         pace_skip_risk(fast)
     else:
+        left = _path_block_left(path)
+        if left > 0:
+            raise Web115RiskError(f"该接口被 115 拦截，{int(left)} 秒后重试：{path}")
         pace(fast)
     _count_call()
     url = (base or BASE) + path
@@ -214,7 +257,20 @@ def _get(
     except requests.RequestException as err:
         raise Web115Error(f"请求 115 失败：{err}") from err
     if resp.status_code in (405, 403):
-        _risk_mark()
+        # 405 有两种完全不同的来源，不能一律当成「整号风控」：
+        #   1) 拦截页（text/html）：115 反爬只针对这条路径/这类参数，别的接口照常。
+        #   2) 接口 JSON 报错：才是登录态或频率层面的限制。
+        # 可选接口（例如「最近文件」兜底）被拦时只跳过本轮，不污染全局退避，
+        # 否则一条非关键请求会把真正重要的操作事件轮询一起拖停。
+        resp_headers = getattr(resp, "headers", None) or {}
+        ctype = str(resp_headers.get("Content-Type") or "").lower()
+        blocked = "html" in ctype
+        if blocked:
+            # 拦截页是路径级的：只冷却这条路径 10 分钟，事件轮询照常。
+            left = _block_path(path)
+            raise Web115RiskError(f"{BLOCK_HINT} 该接口暂停 {int(left)} 秒。")
+        if not soft_risk:
+            _risk_mark()
         raise Web115RiskError(RISK_HINT)
     if resp.status_code != 200:
         raise Web115Error(f"115 返回 HTTP {resp.status_code}")
@@ -229,7 +285,8 @@ def _get(
     if state is False or errno in EXPIRE_ERRNOS:
         msg = payload.get("error") or payload.get("message") or f"errno={errno}"
         if is_risk_message(msg) or str(errno) in ("405", "403"):
-            _risk_mark()
+            if not soft_risk:
+                _risk_mark()
             raise Web115RiskError(RISK_HINT)
         if errno in EXPIRE_ERRNOS or "登录" in str(msg):
             raise Web115Error(f"115 Cookie 已失效：{msg}")
@@ -691,11 +748,11 @@ def recent(cfg: Dict[str, Any], limit: int = 50, offset: int = 0) -> List[Dict[s
     """最近变化的文件（新 → 旧）。"""
     params = {"limit": int(limit), "offset": int(offset), "type": 0}
     try:
-        payload = _get(cfg, "/files/recent", params)
+        # soft_risk=True：这是可选兜底接口，115 对它比对别的接口更敏感，
+        # 被拦时只跳过本轮，不设置全局退避、不影响事件轮询和播放。
+        payload = _get(cfg, "/files/recent", params, soft_risk=True)
     except Web115RiskError as err:
-        # 风控窗口里打任何接口都会被拦，别在这里再退避 30 秒重试。
-        # 「最近文件」只是兜底通道，跳过一轮不影响播放和入库。
-        logger.warn(f"[115] 最近文件接口被风控，本轮跳过：{str(err)[:80]}")
+        logger.warn(f"[115] 「最近文件」兜底本轮跳过（不影响事件入库）：{str(err)[:60]}")
         return []
     except Web115Error as err:
         # 少数账号/版本上 /files/recent 会返回“服务器开小差”，退回最近接收
@@ -776,9 +833,9 @@ def test(cfg: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
         return result
     try:
         items = recent(cfg, limit=5)
-        if not items and risk_active():
-            # recent() 会吞掉风控异常，这里把原因显式带回 WebUI，别让用户以为没数据
-            result["recent_error"] = RISK_HINT
+        if not items:
+            # recent() 会吞掉异常，这里显式说明：最近文件接口被拦不代表 Cookie 坏了
+            result["recent_error"] = "「最近文件」接口暂无数据或被 115 拦截（不影响事件入库与播放）"
         sample = items[0] if items else None
         result["recent_count"] = len(items)
         result["sample"] = sample
