@@ -56,8 +56,18 @@ class PlexHandler(BaseHTTPRequestHandler):
                     }]
                 }
             })
-        if path.endswith("/all"):
-            return self._json({"MediaContainer": {"size": 2, "totalSize": 2}})
+        # part 索引会遍历每个媒体库的 /all 与 /allLeaves，读 Metadata[].Media[].Part[]。
+        # 剧集库的 /all 只给 series（没有 Media/Part），单集在 /allLeaves 里 ——
+        # 和真实 Plex 一致，这样 e2e 才真的覆盖「剧集靠 allLeaves 收录」这条链路。
+        if path.startswith("/library/sections/") and (path.endswith("/all") or path.endswith("/allLeaves")):
+            key = path.split("/library/sections/")[1].split("/")[0]
+            if path.endswith("/allLeaves"):
+                items = [{"title": "S01E01", "Media": [{"Part": [{"id": 123, "file": MEDIA_FILE}]}]}]
+            elif key == "1":  # 电影库：/all 直接带 Part
+                items = [{"title": "沙丘2", "Media": [{"Part": [{"id": 123, "file": MEDIA_FILE}]}]}]
+            else:  # 剧集库：/all 只有 series
+                items = [{"title": "测试剧", "type": "show"}]
+            return self._json({"MediaContainer": {"size": len(items), "totalSize": len(items), "Metadata": items}})
         if "/refresh" in path:
             REFRESH_LOG.append(query.get("path", [""])[0])
             return self._json({"MediaContainer": {"size": 0}})

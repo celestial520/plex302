@@ -675,6 +675,13 @@ async def api_diag_index(part: str = "", path: str = "") -> Any:
     return _ok(out)
 
 
+@app.post("/api/diag/index/rebuild")
+async def api_diag_index_rebuild() -> Any:
+    """手动重建 part 索引（后台跑，不阻塞请求）。换 Plex 地址后可用来立刻补表。"""
+    started = partindex.rebuild()
+    return _ok({"started": started, "state": partindex.state()})
+
+
 @app.get("/api/diag/part")
 async def api_diag_part(part: str = "", token: str = "") -> Any:
     """量一下「向 Plex 要文件路径」这一步：耗时、状态码、原始返回。

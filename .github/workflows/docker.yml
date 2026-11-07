@@ -166,6 +166,17 @@ jobs:
           echo
           sleep 4  # 等 njs 热加载 runtime.json
 
+          echo "--- 重建 part 索引（播放必须靠索引命中，不再问 Plex part 接口） ---"
+          idx=''
+          for i in $(seq 1 25); do
+            curl -s -m 10 -b cookie.txt -X POST http://127.0.0.1:999/api/diag/index/rebuild > /dev/null
+            idx=$(curl -s -m 10 -b cookie.txt 'http://127.0.0.1:999/api/diag/index?part=123')
+            echo "$idx" | grep -q '"found": *true' && break
+            sleep 1
+          done
+          echo "part 索引 $idx"
+          echo "$idx" | grep -q '"found": *true' || { echo "::error::part 123 没进索引"; exit 1; }
+
           echo "--- 测试 Plex 用输入框当前值（不必先保存） ---"
           # 故意传一个和已保存 token 不同的值，验证后端确实拿 body 里的值去测
           pt=$(curl -s -b cookie.txt -X POST -H 'Content-Type: application/json' \
