@@ -17,18 +17,15 @@ from fastapi.staticfiles import StaticFiles
 from . import (
     auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
     scanner, scheduler, store, u115events, u115open, u115ops, u115web, u115weblogin,
-    watcher, wecom,
+    watcher,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.7"
+VERSION = "1.8.8"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
-    "/api/wecom/callback",
-    # CMS 用的是 /api/wx/message?source=wx；保留别名，企业微信后台不用改 URL
-    "/api/wx/message",
 }
 
 
@@ -282,7 +279,6 @@ async def api_status(request: Request) -> Any:
             "default_password": auth.default_password_active(cfg),
             "webhook_url": _webhook_url(request, cfg),
             "emby_url": _emby_url(request, cfg),
-            "wecom_callback": _wecom_url(request, cfg),
         }
     )
 
@@ -295,11 +291,6 @@ def _webhook_url(request: Request, cfg: Dict[str, Any]) -> str:
 def _emby_url(request: Request, cfg: Dict[str, Any]) -> str:
     base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
     return f"{base}/emby?api_key={cfg['security']['emby_token']}"
-
-
-def _wecom_url(request: Request, cfg: Dict[str, Any]) -> str:
-    base = cfg["server"].get("public_url") or str(request.base_url).rstrip("/")
-    return f"{base}/api/wecom/callback"
 
 
 # --------------------------------------------------------------------- 配置
@@ -792,41 +783,6 @@ async def api_ingest(request: Request) -> Any:
     if not result.get("ok"):
         return _err(str(result.get("error") or "入库失败"))
     return _ok(result)
-
-
-# ------------------------------------------------------- 企业微信回调（接收消息）
-@app.get("/api/wecom/callback")
-async def api_wecom_verify(request: Request) -> Any:
-    cfg = config.load()
-    try:
-        plain = wecom.verify_url(cfg, dict(request.query_params))
-    except wecom.WecomError as err:
-        logger.warn(f"[微信] 回调校验失败：{err}")
-        return Response(content=str(err), status_code=403, media_type="text/plain")
-    return Response(content=plain, media_type="text/plain")
-
-
-@app.post("/api/wecom/callback")
-async def api_wecom_callback(request: Request) -> Any:
-    cfg = config.load()
-    body = await request.body()
-    try:
-        reply = await asyncio.to_thread(wecom.handle_message, cfg, body, dict(request.query_params))
-    except wecom.WecomError as err:
-        logger.warn(f"[微信] 消息处理失败：{err}")
-        return Response(content=str(err), status_code=403, media_type="text/plain")
-    return Response(content=reply, media_type="application/xml")
-
-
-@app.get("/api/wx/message")
-async def api_wx_verify(request: Request) -> Any:
-    """CMS 兼容别名：企业微信后台「API接收消息」直接填 /api/wx/message 也能用。"""
-    return await api_wecom_verify(request)
-
-
-@app.post("/api/wx/message")
-async def api_wx_callback(request: Request) -> Any:
-    return await api_wecom_callback(request)
 
 
 # ------------------------------------------------------- 全量同步

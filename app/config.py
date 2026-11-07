@@ -130,8 +130,6 @@ DEFAULTS: dict[str, Any] = {
         "wecom_agentid": "",
         "wecom_touser": "@all",
         "wecom_proxy": "",
-        "wecom_token": "",       # 接收消息回调验签用（CMS 的「Token」）
-        "wecom_aes_key": "",     # 接收消息解密用（CMS 的「EncodingAESKey」）
         "on_scan": True,
         "on_full": True,
         "on_error": True,
@@ -140,9 +138,6 @@ DEFAULTS: dict[str, Any] = {
     "ingest": {
         "enabled": False,
         "target_dir": "",
-        "wecom_token": "",
-        "wecom_aes_key": "",
-        "allow_users": "",
     },
     "advanced": {
         "force_direct_play": True,
@@ -359,14 +354,6 @@ def normalize(cfg: dict) -> dict:
     notify["wecom_agentid"] = str(notify.get("wecom_agentid") or "").strip()
     notify["wecom_touser"] = str(notify.get("wecom_touser") or "@all").strip() or "@all"
     notify["wecom_proxy"] = str(notify.get("wecom_proxy") or "").strip()
-    notify["wecom_token"] = str(notify.get("wecom_token") or "").strip()
-    notify["wecom_aes_key"] = str(notify.get("wecom_aes_key") or "").strip()
-    # 老版本把回调 Token / AESKey 放在 ingest 里，升级时自动搬过来
-    ingest = cfg.setdefault("ingest", {})
-    if not notify["wecom_token"]:
-        notify["wecom_token"] = str(ingest.get("wecom_token") or "").strip()
-    if not notify["wecom_aes_key"]:
-        notify["wecom_aes_key"] = str(ingest.get("wecom_aes_key") or "").strip().rstrip("/")
     notify["on_scan"] = _as_bool(notify.get("on_scan"), True)
     notify["on_full"] = _as_bool(notify.get("on_full"), True)
     notify["on_error"] = _as_bool(notify.get("on_error"), True)
@@ -374,12 +361,11 @@ def normalize(cfg: dict) -> dict:
     ingest = cfg["ingest"]
     ingest["enabled"] = _as_bool(ingest.get("enabled"), False)
     ingest["target_dir"] = _norm_prefix(ingest.get("target_dir"))
-    ingest["wecom_token"] = str(ingest.get("wecom_token") or "").strip()
-    ingest["wecom_aes_key"] = str(ingest.get("wecom_aes_key") or "").strip()
-    users = ingest.get("allow_users")
-    if isinstance(users, list):
-        users = ",".join(str(x) for x in users)
-    ingest["allow_users"] = str(users or "").strip()
+    # 「接收消息」那套（回调 Token / EncodingAESKey / 允许的用户）已经下线，
+    # 老配置里残留的字段在这里清掉，避免以后看配置时被误导。
+    for stale in ("wecom_token", "wecom_aes_key", "allow_users"):
+        ingest.pop(stale, None)
+        notify.pop(stale, None)
 
     adv = cfg["advanced"]
     adv["force_direct_play"] = _as_bool(adv.get("force_direct_play"), True)
@@ -480,10 +466,6 @@ def masked(cfg: dict) -> dict:
     out["security"].pop("password_hash", None)
     out["notify"]["wecom_secret_set"] = bool(out["notify"].get("wecom_secret"))
     out["notify"]["wecom_secret"] = ""
-    out["notify"]["wecom_aes_key_set"] = bool(out["notify"].get("wecom_aes_key"))
-    out["notify"]["wecom_aes_key"] = ""
-    out["ingest"]["wecom_aes_key_set"] = bool(out["ingest"].get("wecom_aes_key"))
-    out["ingest"]["wecom_aes_key"] = ""
     out["security"].pop("secret", None)
     return out
 
@@ -527,16 +509,6 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
         security["emby_token"] = old_cfg["security"].get("emby_token", "")
     notify = new_cfg.setdefault("notify", {})
     notify.pop("wecom_secret_set", None)
-    notify.pop("wecom_aes_key_set", None)
     if not notify.get("wecom_secret"):
         notify["wecom_secret"] = old_cfg.get("notify", {}).get("wecom_secret", "")
-    # 回调 Token / EncodingAESKey：界面上留空 = 不修改
-    if not notify.get("wecom_token"):
-        notify["wecom_token"] = old_cfg.get("notify", {}).get("wecom_token", "") or old_cfg.get("ingest", {}).get("wecom_token", "")
-    if not notify.get("wecom_aes_key"):
-        notify["wecom_aes_key"] = old_cfg.get("notify", {}).get("wecom_aes_key", "") or old_cfg.get("ingest", {}).get("wecom_aes_key", "")
-    ingest = new_cfg.setdefault("ingest", {})
-    ingest.pop("wecom_aes_key_set", None)
-    if not ingest.get("wecom_aes_key"):
-        ingest["wecom_aes_key"] = old_cfg.get("ingest", {}).get("wecom_aes_key", "")
     return new_cfg

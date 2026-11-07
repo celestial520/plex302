@@ -776,28 +776,21 @@
         <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。库大时 Plex 会把整棵树重新读一遍，经 CD2 落到 115 就是成千上万次目录读取，和 CMS 抢额度，所以默认关闭。</div></div>
       `)}
 
-      ${section('通知（企业微信）', '字段与 CMS 完全对应，可以照着 CMS 那一页抄过来。', `
-        <div class="callout info" style="margin-bottom:14px">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-            <b>API 接收消息 URL</b>
-            <code id="wecom-callback-url">${esc((state.status && state.status.wecom_callback) || (location.origin + '/api/wecom/callback'))}</code>
-            <button class="btn ghost sm" id="btn-copy-callback">复制</button>
-          </div>
-          企业微信后台 → 应用 → 接收消息 → 设置 API 接收：URL 填这个，<b>Token</b> 与 <b>EncodingAESKey</b> 填下面两行，两边必须一字不差。<br>
-          已经按 CMS 配过的不用改 URL：本项目的 <code>/api/wx/message</code> 与 CMS 是同一个入口，照样能用。
+      ${section('通知（企业微信）', '只负责「往企业微信发通知」，字段与 CMS 那一页一一对应，直接抄即可。', `
+        <div class="callout" style="margin-bottom:14px">
+          <b>本工具只发不收。</b>不会占用企业微信的「接收消息」回调地址，所以 CMS 的微信菜单照常可用，两者互不影响。<br>
+          下面只需要 4 项：企业ID、应用Secret、应用ID、接收人；API代理选填。
         </div>
         <div class="form-rows">
           <div class="form-row-line"><label>企业ID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, 'ww...')}</div>
           <div class="form-row-line"><label>应用Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '', 'password')}</div>
           <div class="form-row-line"><label>应用ID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '1000002')}</div>
+          <div class="form-row-line"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all 或 UserID，多个用竖线分隔')}</div>
           <div class="form-row-line"><label>API代理</label>
             <div class="cell-stack">${input('cfg-wecom-proxy', c.notify.wecom_proxy, 'http://1.2.3.4:8981 或 https://wecom.example.com')}
               <span class="desc">填 CMS 那种 <code>http://ip:port</code> 会当正向代理走；填反代域名会当接口基址。两种都支持，会自动识别。</span>
             </div>
           </div>
-          <div class="form-row-line"><label>Token</label>${input('cfg-wecom-token', c.notify.wecom_token, '接收消息的 Token（可留空，只推送不接收）')}</div>
-          <div class="form-row-line"><label>EncodingAESKey</label>${input('cfg-wecom-aes', '', c.notify.wecom_aes_key_set ? '已保存，留空不修改' : '43 位，接收消息用')}</div>
-          <div class="form-row-line"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all 或 UserID，多个用 | 分隔')}</div>
           <div class="form-row-line"><label>状态</label>
             <label class="switch"><input type="checkbox" id="cfg-wecom-enabled" ${c.notify.wecom_enabled ? 'checked' : ''}><i></i></label>
           </div>
@@ -994,12 +987,7 @@
     });
     const webLoginBtn = $('#btn-115-web-login');
     if (webLoginBtn) webLoginBtn.addEventListener('click', startWebLogin);
-    const copyCb = $('#btn-copy-callback');
-    if (copyCb) copyCb.addEventListener('click', () => {
-      const el = $('#wecom-callback-url');
-      copyText(el ? el.textContent.trim() : '');
-      toast('回调地址已复制', 'ok');
-    });
+
     $$('[data-theme-seg] button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.mode)));
     applyTheme(themeMode(), false);
     $('#btn-change-pass').addEventListener('click', async () => {
@@ -1196,8 +1184,6 @@
     if (val('cfg-wecom-secret')) c.notify.wecom_secret = val('cfg-wecom-secret');
     c.notify.wecom_touser = val('cfg-wecom-touser') || '@all';
     c.notify.wecom_proxy = val('cfg-wecom-proxy');
-    c.notify.wecom_token = val('cfg-wecom-token');
-    if (val('cfg-wecom-aes')) c.notify.wecom_aes_key = val('cfg-wecom-aes');
 
     c.u115.recent_enabled = c.events.recent_fallback;
     if (val('cfg-115-cookie')) c.u115.cookie = val('cfg-115-cookie');

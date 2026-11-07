@@ -324,11 +324,13 @@ jobs:
           [ "$info" = "200" ] || { echo "::error::Emby System/Info 不通"; exit 1; }
           [ "$refresh" = "204" ] || { echo "::error::Emby Library/Refresh 应返回 204"; exit 1; }
 
-          echo "--- 企业微信回调验签 ---"
-          wc=$(curl -s -o /dev/null -w '%{http_code}' \
+          echo "--- 企业微信只发不收（回调已下线） ---"
+          wc=$(curl -s -o /dev/null -w '%{http_code}' -b cookie.txt \
             'http://127.0.0.1:999/api/wecom/callback?msg_signature=bad&timestamp=1&nonce=n&echostr=e')
-          echo "错误签名=$wc"
-          [ "$wc" = "403" ] || { echo "::error::企业微信回调没有校验签名"; exit 1; }
+          wm=$(curl -s -o /dev/null -w '%{http_code}' -b cookie.txt 'http://127.0.0.1:999/api/wx/message')
+          echo "wecom=$wc wx=$wm"
+          [ "$wc" = "404" ] || { echo "::error::/api/wecom/callback 应已下线（404）"; exit 1; }
+          [ "$wm" = "404" ] || { echo "::error::/api/wx/message 应已下线（404）"; exit 1; }
 
       - name: 输出日志
         if: always()
