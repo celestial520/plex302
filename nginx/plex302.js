@@ -134,8 +134,10 @@ function routeSet(key, url, ttlSec) {
 }
 
 // ------------------------------------------------------------ 工具
+const RESOLVE_TIMEOUT_MS = 10000;
+
 async function askResolver(r, body) {
-    const res = await ngx.fetch(rt.resolver + '/api/resolve', {
+    const pending = ngx.fetch(rt.resolver + '/api/resolve', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -143,9 +145,21 @@ async function askResolver(r, body) {
         },
         body: JSON.stringify(body),
         max_response_body_size: 65536
+    }).then(function (res) {
+        return res.ok ? res.json() : null;
+    }).catch(function () {
+        return null;
     });
-    if (!res.ok) return null;
-    return await res.json();
+    // 后端进程整个卡死时（例如 999 不监听/死锁），ngx.fetch 会一直悬着，
+    // 客户端只能干等，日志里也不会留下任何东西。这里加一道硬上限：
+    // 超时当作「没解析到」，走下面的回源分支并写一条 [回源] 日志。
+    if (typeof setTimeout !== 'function') return await pending;
+    const limit = new Promise(function (resolve) {
+        setTimeout(function () {
+            resolve({ action: 'proxy', reason: 'resolver-timeout(nginx)' });
+        }, RESOLVE_TIMEOUT_MS);
+    });
+    return await Promise.race([pending, limit]);
 }
 
 function proxyToPlex(r) {

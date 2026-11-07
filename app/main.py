@@ -22,7 +22,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.8"
+VERSION = "1.8.9"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -530,7 +530,15 @@ async def api_resolve(request: Request) -> Any:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         return _err("请求体不是 JSON")
-    result = await resolver.resolver.resolve(payload)
+    # 播放是等人看的前台请求，不能被 115 卡住：njs 那边虽然在等，但播放器早就断了。
+    # 8 秒拿不到结果就放弃 302、直接回源 Plex —— 能播比"看起来像 302"重要，
+    # 而且这里必须留一条日志，否则用户只会看到"播放不了、日志也没有"。
+    uri = str(payload.get("uri") or payload.get("path") or "")
+    try:
+        result = await asyncio.wait_for(resolver.resolver.resolve(payload), timeout=8.0)
+    except asyncio.TimeoutError:
+        logger.warn(f"[302] 解析超时（>8 秒），本次回源 Plex：{uri}")
+        result = {"action": "proxy", "reason": "resolver-timeout"}
     return JSONResponse(result)
 
 
