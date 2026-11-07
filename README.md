@@ -233,16 +233,25 @@ Plex 设置 → 网络 →「自定义服务器访问 URL」填 `http://NAS的IP
 
 ---
 
-## 直链来源怎么选
+## 直链来源：固定 115 官方接口
 
-| 选项 | 说明 |
-|---|---|
-| **115 官方接口**（默认） | 扫码登录后可用；路径 → pickcode 一次请求，最稳 |
-| MoviePilot | 借 MP 已授权的 115 开放平台拿 pickcode，直链仍用 Cookie 换 |
-| 115 纯 Cookie | 不依赖任何登录，但要逐级列目录，首次慢、容易撞风控 |
-| CD2 / AList / 自定义 | 混合网盘或自建中转 |
+和 plex-demo 完全同一条链路，没有第二个选项：
 
-前三种之外的失败都会**自动回退**到纯 Cookie，只要你填了 Cookie，播放就不会因为接口抽风而中断。
+```
+Plex 请求 /library/parts
+  → POST proapi.115.com/open/folder/get_info  {path}      1 次，按完整路径定位 pickcode
+  → POST proapi.115.com/open/ufile/downurl    {pick_code} 1 次，换直链
+  → 302
+```
+
+之前提供过「纯 Cookie / AList / CD2 / 自定义接口」几个选项，已经删掉了：
+
+- **纯 Cookie** 要逐级列目录（一个文件 3~4 个请求），首次起播慢，还更容易撞风控
+- 其余几个都需要额外维护一套凭据，对这个场景没有收益
+
+官方接口临时不可用时（token 过期、proapi 抽风），代码会**自动回退**网页 Cookie 兜底一次；再失败就回源 Plex，播放不会中断。
+
+> 老配置里的 `provider.type` 会在保存时被强制改成 `open115`，不需要你手动改。
 
 ---
 

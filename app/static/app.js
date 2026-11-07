@@ -683,12 +683,13 @@
         </div>
       `, true)}
 
-      ${section('直链方式', '决定 302 的目标从哪里来。推荐「115 官方接口」：路径 → pickcode 一次请求搞定；Cookie 只留给下面「自动入库」的事件监听。', `
-        <div class="field"><label>直链来源</label>
-          <select id="cfg-provider">
-            ${[['open115', '115 官方接口（推荐，扫码登录）'], ['mp', 'MoviePilot（借 MP 的 115 官方接口）'], ['115', '115 纯 Cookie（不推荐）'], ['cd2', 'CloudDrive2 直链'], ['alist', 'AList / OpenList'], ['custom', '自定义 HTTP 接口'], ['none', '不 302，全部回源 Plex']]
-              .map((x) => `<option value="${x[0]}" ${c.provider.type === x[0] ? 'selected' : ''}>${x[1]}</option>`).join('')}
-          </select>
+      ${section('直链', '直链来源固定为 115 官方接口——和 plex-demo 同一条链路：路径 → pickcode 一次定位，pickcode → 直链再一次，两个请求搞定，不列目录。', `
+        <div class="field full">
+          <div class="callout info">
+            <b>直链来源：115 官方接口（固定）。</b>不再提供 Cookie 逐级列目录 / AList / CD2 / 自定义接口这些选项——
+            它们要么慢（一个文件要列 3~4 层目录），要么要额外维护一套凭据。<br>
+            官方接口临时不可用（token 过期、proapi 抽风）时会自动回退网页 Cookie 兜底一次，再失败就回源 Plex，播放不会中断。
+          </div>
         </div>
         <div class="field"><label>请求直链时的 User-Agent</label>
           <select id="cfg-ua-mode">
@@ -697,27 +698,6 @@
           </select>
         </div>
         <div class="field"><label>固定 UA</label>${input('cfg-fixed-ua', c.provider.fixed_ua, 'Plex302/1.0')}</div>
-        <div class="field full" id="mp-fields">
-          <div class="callout info">播放时由 MoviePilot 用 115 开放平台接口按完整路径取 pickcode（1 次请求就能定位，不需要逐级列目录），再由本程序用下面的 115 Cookie 换直链并 302。<br>Cookie 仍然必填：换直链要用它，「局部入库」的事件监听也用它；两者互不影响。</div>
-          <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
-            <div class="field"><label>MoviePilot 地址</label>${input('cfg-mp-base', c.provider.mp_base, 'http://127.0.0.1:3000')}</div>
-            <div class="field"><label>MP API Token</label>${input('cfg-mp-token', '', c.provider.mp_token_set ? '已保存，留空不修改' : 'MP → 设置 → 系统 → API Token', 'password')}</div>
-            <div class="field"><label>MP 里的存储类型</label>${input('cfg-mp-storage', c.provider.mp_storage, 'u115')}</div>
-          </div>
-        </div>
-        <div class="field full" id="alist-fields">
-          <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
-            <div class="field"><label>AList 地址</label>${input('cfg-alist-base', c.provider.alist_base, 'http://127.0.0.1:5244')}</div>
-            <div class="field"><label>AList Token</label>${input('cfg-alist-token', '', c.provider.alist_token_set ? '已保存，留空不修改' : 'AList 后台 → 设置 → 令牌', 'password')}</div>
-            <div class="field"><label>AList 公网地址（可选）</label>${input('cfg-alist-public', c.provider.alist_public_base, 'https://alist.example.com')}</div>
-          </div>
-        </div>
-        <div class="field full" id="custom-fields">
-          <div class="form-body" style="padding:0;grid-template-columns:1fr 1fr">
-            <div class="field"><label>自定义接口 URL</label>${input('cfg-custom-url', c.provider.custom_url, 'http://127.0.0.1:8080/link?path=')}</div>
-            <div class="field"><label>Bearer Token（可选）</label>${input('cfg-custom-token', '', c.provider.custom_token_set ? '已保存，留空不修改' : '', 'password')}</div>
-          </div>
-        </div>
         <div class="field full">
           ${switchLine('强制 https', '把 115 返回的 http 直链改成 https，避免部分客户端拦截混合内容', 'cfg-force-https', c.provider.force_https)}
         </div>
@@ -1003,8 +983,6 @@
     if (open115LoginBtn) open115LoginBtn.addEventListener('click', startOpen115Login);
     const open115LogoutBtn = $('#btn-open115-logout');
     if (open115LogoutBtn) open115LogoutBtn.addEventListener('click', logoutOpen115);
-    $('#cfg-provider').addEventListener('change', updateProviderFields);
-    updateProviderFields();
   }
 
   // 115 网页扫码：/get/status 是长轮询（没变化会挂 30 秒），
@@ -1125,14 +1103,6 @@
     });
   }
 
-  function updateProviderFields() {
-    const type = $('#cfg-provider').value;
-    $('#alist-fields').style.display = type === 'alist' ? '' : 'none';
-    $('#custom-fields').style.display = type === 'custom' ? '' : 'none';
-    const mpBox = $('#mp-fields');
-    if (mpBox) mpBox.style.display = type === 'mp' ? '' : 'none';
-  }
-
   function collectConfig() {
     const c = structuredClone(state.config);
     const val = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
@@ -1144,17 +1114,9 @@
     if (val('cfg-plex-token')) c.plex.token = val('cfg-plex-token');
     c.cd2.address = val('cfg-cd2-address');
     if (val('cfg-cd2-token')) c.cd2.token = val('cfg-cd2-token');
-    c.provider.type = val('cfg-provider') || c.provider.type;
+    c.provider.type = 'open115';
     c.provider.ua_mode = val('cfg-ua-mode');
     c.provider.fixed_ua = val('cfg-fixed-ua');
-    c.provider.alist_base = val('cfg-alist-base');
-    if (val('cfg-alist-token')) c.provider.alist_token = val('cfg-alist-token');
-    c.provider.alist_public_base = val('cfg-alist-public');
-    c.provider.custom_url = val('cfg-custom-url');
-    if (val('cfg-custom-token')) c.provider.custom_token = val('cfg-custom-token');
-    c.provider.mp_base = val('cfg-mp-base');
-    if (val('cfg-mp-token')) c.provider.mp_token = val('cfg-mp-token');
-    c.provider.mp_storage = val('cfg-mp-storage') || 'u115';
     c.provider.force_https = checked('cfg-force-https');
 
     c.mounts = $$('#mount-list .mount-row').map((row, i) => ({

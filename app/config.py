@@ -53,19 +53,14 @@ DEFAULTS: dict[str, Any] = {
         "address": "127.0.0.1:19798",
         "token": "",
     },
+    # 直链来源固定为 115 官方接口（和 plex-demo 同一条链路）：
+    # 路径 → pickcode 一次定位，pickcode → 直链再一次，两个请求。
+    # 不再提供 AList / CD2 / 自定义 / 纯 Cookie 这些选项，见 providers.py 说明。
     "provider": {
-        "type": "open115",  # open115 | mp | 115 | cd2 | alist | custom | none
+        "type": "open115",
         "ua_mode": "client",  # client | fixed
         "fixed_ua": "Plex302/1.0",
         "force_https": True,
-        "alist_base": "",
-        "alist_token": "",
-        "alist_public_base": "",
-        "custom_url": "",
-        "custom_token": "",
-        "mp_base": "",
-        "mp_token": "",
-        "mp_storage": "u115",
     },
     "scan": {
         "enabled": True,
@@ -253,19 +248,17 @@ def normalize(cfg: dict) -> dict:
     cd2["token"] = str(cd2.get("token") or "").strip()
 
     provider = cfg["provider"]
-    ptype = str(provider.get("type") or "115").lower()
-    provider["type"] = ptype if ptype in ("open115", "mp", "115", "cd2", "alist", "custom", "none") else "open115"
+    # 直链来源固定官方接口：老配置里的 "115"/"mp"/"alist"/"custom"/"none" 一律改过来，
+    # 否则升级后还会跑「逐级列目录」那条慢链路（用户踩过这个坑）。
+    # 官方接口临时不可用时 providers 内部会兜底回退 Cookie，不需要用户再选。
+    if str(provider.get("type") or "").lower() != "open115":
+        provider["type"] = "open115"
     provider["ua_mode"] = "fixed" if str(provider.get("ua_mode")) == "fixed" else "client"
     provider["fixed_ua"] = str(provider.get("fixed_ua") or "Plex302/1.0")[:200]
     provider["force_https"] = _as_bool(provider.get("force_https"), True)
-    provider["alist_base"] = str(provider.get("alist_base") or "").strip().rstrip("/")
-    provider["alist_token"] = str(provider.get("alist_token") or "").strip()
-    provider["alist_public_base"] = str(provider.get("alist_public_base") or "").strip().rstrip("/")
-    provider["custom_url"] = str(provider.get("custom_url") or "").strip()
-    provider["custom_token"] = str(provider.get("custom_token") or "").strip()
-    provider["mp_base"] = str(provider.get("mp_base") or "").strip().rstrip("/")
-    provider["mp_token"] = str(provider.get("mp_token") or "").strip()
-    provider["mp_storage"] = str(provider.get("mp_storage") or "u115").strip() or "u115"
+    for stale in ("alist_base", "alist_token", "alist_public_base", "custom_url",
+                  "custom_token", "mp_base", "mp_token", "mp_storage"):
+        provider.pop(stale, None)
 
     u115_open = cfg.setdefault("u115_open", {})
     u115_open["client_id"] = str(u115_open.get("client_id") or "100195313").strip() or "100195313"
@@ -445,12 +438,6 @@ def masked(cfg: dict) -> dict:
     out = copy.deepcopy(cfg)
     out["plex"]["token_set"] = bool(out["plex"].get("token"))
     out["plex"]["token"] = ""
-    out["provider"]["alist_token_set"] = bool(out["provider"].get("alist_token"))
-    out["provider"]["alist_token"] = ""
-    out["provider"]["custom_token_set"] = bool(out["provider"].get("custom_token"))
-    out["provider"]["custom_token"] = ""
-    out["provider"]["mp_token_set"] = bool(out["provider"].get("mp_token"))
-    out["provider"]["mp_token"] = ""
     out["cd2"]["token_set"] = bool(out["cd2"].get("token"))
     out["cd2"]["token"] = ""
     cookie = out["u115"].get("cookie") or ""
@@ -478,14 +465,6 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
     cd2 = new_cfg.setdefault("cd2", {})
     if not cd2.get("token"):
         cd2["token"] = old_cfg.get("cd2", {}).get("token", "")
-    provider = new_cfg.setdefault("provider", {})
-    old_provider = old_cfg.get("provider", {})
-    if not provider.get("alist_token"):
-        provider["alist_token"] = old_provider.get("alist_token", "")
-    if not provider.get("custom_token"):
-        provider["custom_token"] = old_provider.get("custom_token", "")
-    if not provider.get("mp_token"):
-        provider["mp_token"] = old_provider.get("mp_token", "")
     open115 = new_cfg.setdefault("u115_open", {})
     old_open115 = old_cfg.get("u115_open", {})
     open115.pop("logged_in", None)

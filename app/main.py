@@ -22,7 +22,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.10"
+VERSION = "1.8.11"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -38,7 +38,6 @@ async def lifespan(app: FastAPI):
     logger.info(f"Plex302 v{VERSION} 启动，配置目录 {config.CONFIG_DIR}")
     if created:
         logger.warn("WebUI 初始账号 admin/admin，请登录后立即修改密码")
-    _warn_slow_provider(cfg)
     await scanner.scanner.start()
     await watcher.watcher.start()
     await events.event_watcher.start()
@@ -281,28 +280,6 @@ async def api_status(request: Request) -> Any:
             "webhook_url": _webhook_url(request, cfg),
             "emby_url": _emby_url(request, cfg),
         }
-    )
-
-
-def _warn_slow_provider(cfg: Dict[str, Any]) -> None:
-    """直链来源还是老的「115 纯 Cookie」时提醒一次。
-
-    老版本默认是 Cookie 逐级列目录（一个文件要列 3~4 层目录），升级不会改
-    已经保存的配置，所以很多人升级后直链来源还停在 Cookie 模式——播放能通，
-    但首次起播要好几秒，遇到风控冷却还会更慢。官方接口按路径一次定位，快得多。
-    """
-    provider = str(cfg["provider"].get("type") or "")
-    if provider != "115":
-        return
-    if not u115open.token_state(cfg).get("logged_in"):
-        logger.warn(
-            "当前直链来源是「115 纯 Cookie」：新文件首次播放要逐级列目录（较慢）。"
-            "扫码登录 115 官方接口后改成「115 官方接口」会快很多。"
-        )
-        return
-    logger.warn(
-        "已扫码登录 115 官方接口，但直链来源仍是「115 纯 Cookie」（逐级列目录，首次起播慢）。"
-        "建议到 设置 → 直链方式 改成「115 官方接口」。"
     )
 
 
