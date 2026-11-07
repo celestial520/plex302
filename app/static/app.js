@@ -629,10 +629,18 @@
           这一个 Cookie 同时用于：<b>取直链</b>（<code>/files/download</code>）、<b>读最近操作</b>（<code>/behavior/detail</code>）、<b>反查目录</b>（<code>/files</code>）。</span>
         </div>
         <div class="field full"><div class="field-row">
+          <button class="btn sm" id="btn-115-web-login"><svg><use href="#i-qr"></use></svg>扫码获取 Cookie</button>
           <button class="btn sm" id="btn-115-cookie-test">测试 Cookie</button>
           <button class="btn sm ghost" id="btn-115-cookie-full">测完整链路</button>
           <span class="desc" id="cookie-test-result"></span>
         </div></div>
+        <div class="field full">
+          <div id="weblogin-qr" style="display:none;margin-top:6px">
+            <img id="weblogin-qr-img" alt="115 网页登录二维码" style="width:180px;height:180px;background:#fff;padding:8px;border-radius:10px">
+            <p class="hint" id="weblogin-qr-tip">用 115 App 扫码并确认，这里会自动检测（二维码 5 分钟有效）</p>
+          </div>
+          <div class="result-box" id="weblogin-msg" style="margin-top:8px">「扫码获取 Cookie」和 CMS 的 115 扫码登录是同一条路：扫完自动写入并保存，不用再开 F12 复制。原来手动粘贴的 Cookie 仍然有效。</div>
+        </div>
         <div class="field full"><span class="desc">「测试 Cookie」只发 1 个 115 请求验登录态；「测完整链路」会连续请求最近文件 / 目录 / 直链，115 风控时可能返回 405。<b>同一份 Cookie 别让 CMS 等多个工具同时高频使用</b>；被风控后暂停 5~10 分钟再试，不必重复制 Cookie。</span></div>
       `, true)}
 
@@ -727,7 +735,9 @@
           ${switchLine('同时看「最近文件」（默认关）', '额外的兜底通道。115 对 /files* 拦得比别的接口严，容易被 405，且事件流水正常时基本用不上；除非你发现真的漏事件，否则别开', 'cfg-events-recent', c.events.recent_fallback)}
         </div>
         <div class="field"><label>检查间隔</label>${dur('cfg-events-interval', c.events.interval)}
-          <span class="desc">多久去 115 看一次有没有新操作。填 1 分钟就够用；想更省请求可以填 5 分钟。</span></div>
+          <span class="desc">多久去 115 看一次有没有新操作，可填 1 分钟 ~ 6 小时（像 CMS 那样设 1 小时也行）。
+            <b>它只影响「多久发现」，不影响「会不会漏」</b>：游标是增量的，拉得慢只是晚一点入库，中间不会跳条。
+            代价是 CMS 整理完到 Plex 扫到之间会有这么长的延迟。</span></div>
         <div class="field"><label>&nbsp;</label><button class="btn sm" id="btn-events-run"><svg><use href="#i-events"></use></svg>立即检查</button></div>
         <div class="field full"><span class="desc" id="events-run-result"></span></div>
         <div class="field full">
@@ -982,6 +992,8 @@
         toast(err.message || '发送失败', 'bad');
       }
     });
+    const webLoginBtn = $('#btn-115-web-login');
+    if (webLoginBtn) webLoginBtn.addEventListener('click', startWebLogin);
     const copyCb = $('#btn-copy-callback');
     if (copyCb) copyCb.addEventListener('click', () => {
       const el = $('#wecom-callback-url');
@@ -1005,6 +1017,58 @@
     if (open115LogoutBtn) open115LogoutBtn.addEventListener('click', logoutOpen115);
     $('#cfg-provider').addEventListener('change', updateProviderFields);
     updateProviderFields();
+  }
+
+  // 115 网页扫码：/get/status 是长轮询（没变化会挂 30 秒），
+  // 所以这里用「一次请求 → 返回后再发下一次」的串行循环，避免请求堆叠。
+  let webLoginSeq = 0;
+
+  async function startWebLogin() {
+    const box = $('#weblogin-qr');
+    const msg = $('#weblogin-msg');
+    const seq = ++webLoginSeq;
+    try {
+      const r = await api('/api/115/login/web/start', { method: 'POST' });
+      const d = r.data || {};
+      if (!d.uid) throw new Error('115 没有返回二维码');
+      $('#weblogin-qr-img').src = '/api/115/login/web/qr.svg?uid=' + encodeURIComponent(d.uid) + '&_=' + Date.now();
+      box.style.display = '';
+      msg.textContent = '请用 115 App 扫码，扫完在手机上点「确认登录」';
+      pollWebLogin(d.uid, seq, Date.now());
+    } catch (err) {
+      msg.textContent = err.message || '获取二维码失败';
+    }
+  }
+
+  async function pollWebLogin(uid, seq, startedAt) {
+    if (seq !== webLoginSeq) return;
+    const msg = $('#weblogin-msg');
+    try {
+      const r = await api('/api/115/login/web/status?uid=' + encodeURIComponent(uid));
+      const d = r.data || {};
+      if (seq !== webLoginSeq) return;
+      if (d.cookie_set) {
+        webLoginSeq++;
+        $('#weblogin-qr').style.display = 'none';
+        msg.textContent = '已扫码登录，Cookie 已保存（' + (d.hint || '') + '）。事件监听下一轮自动生效，不用重启容器。';
+        toast('Cookie 已写入并保存', 'ok');
+        await loadStatus();
+        return;
+      }
+      const st = Number(d.status || 0);
+      if (st === 1) msg.textContent = '已扫码，请在手机上点「确认登录」';
+      else if (d.message) msg.textContent = d.message;
+    } catch (err) {
+      if (seq !== webLoginSeq) return;
+      if (msg) msg.textContent = err.message || '查询扫码状态失败，重试中';
+    }
+    if (seq !== webLoginSeq) return;
+    if (Date.now() - startedAt > 6 * 60 * 1000) {
+      $('#weblogin-qr').style.display = 'none';
+      if (msg) msg.textContent = '二维码已过期，请重新点「扫码获取 Cookie」';
+      return;
+    }
+    setTimeout(() => pollWebLogin(uid, seq, startedAt), 600);
   }
 
   let open115Timer = null;

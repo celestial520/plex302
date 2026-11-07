@@ -16,12 +16,13 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
-    scanner, scheduler, store, u115events, u115open, u115ops, u115web, watcher, wecom,
+    scanner, scheduler, store, u115events, u115open, u115ops, u115web, u115weblogin,
+    watcher, wecom,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -623,6 +624,53 @@ async def api_115open_login_qr(uid: str) -> Any:
         logger.warn(f"[115Open] 生成二维码失败：{err}")
         return Response(status_code=500, content=b"qr error")
     return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+# --------------------------------------------------- 115 网页扫码（拿 Cookie，CMS 同款）
+# 和上面的开放平台扫码是两件事：这一套换回来的是网页 Cookie（UID/CID/SEID/KID），
+# 只给「操作事件 → 局部入库」用，等价于手动 F12 复制那条路，只是省掉手工。
+@app.post("/api/115/login/web/start")
+async def api_115web_login_start() -> Any:
+    try:
+        data = await asyncio.to_thread(u115weblogin.start)
+    except u115weblogin.WebLoginError as err:
+        return _err(str(err))
+    return _ok(data)
+
+
+@app.get("/api/115/login/web/qr.svg")
+async def api_115web_login_qr(uid: str) -> Any:
+    text = u115weblogin.qr_text(uid)
+    if not text:
+        return Response(status_code=404, content=b"expired")
+    try:
+        svg = await asyncio.to_thread(_qr_svg, text)
+    except Exception as err:  # noqa: BLE001
+        logger.warn(f"[115] 生成二维码失败：{err}")
+        return Response(status_code=500, content=b"qr error")
+    return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/115/login/web/status")
+async def api_115web_login_status(uid: str = "") -> Any:
+    if not uid:
+        return _err("缺少 uid")
+    try:
+        st = await asyncio.to_thread(u115weblogin.poll, uid)
+    except u115weblogin.WebLoginError as err:
+        return _err(str(err))
+    status = int(st.get("status") or 0)
+    if status != 2:
+        return _ok({"status": status, "message": st.get("message", "")})
+    try:
+        result = await asyncio.to_thread(u115weblogin.finish, uid)
+    except u115weblogin.WebLoginError as err:
+        return _err(str(err))
+    cfg = config.load()
+    cfg["u115"]["cookie"] = result["cookie"]
+    config.save(cfg)
+    logger.info("[115] 网页扫码完成，Cookie 已保存（事件监听下一轮自动生效）")
+    return _ok({"status": 2, "cookie_set": True, "hint": result["hint"]})
 
 
 @app.get("/api/115open/login/status")

@@ -340,7 +340,9 @@ def normalize(cfg: dict) -> dict:
     events = cfg["events"]
     events["enabled"] = _as_bool(events.get("enabled"), True)
     events["first_scan"] = _as_bool(events.get("first_scan"), False)
-    events["interval"] = _as_int(events.get("interval"), 60, 15, 3600)
+    # 15 秒 ~ 6 小时。间隔只影响「多久发现变化」，不影响完整性：
+    # 游标是增量的，拉得慢只是晚一点入库，不会漏条（积压时自动加深翻页）。
+    events["interval"] = _as_int(events.get("interval"), 60, 15, 21600)
     events["limit"] = _as_int(events.get("limit"), 100, 20, 500)
     events["max_pages"] = _as_int(events.get("max_pages"), 5, 1, 20)
     events["settle_seconds"] = _as_int(events.get("settle_seconds"), 90, 0, 3600)
