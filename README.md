@@ -237,6 +237,40 @@ Plex 设置 → 网络 →「自定义服务器访问 URL」填 `http://NAS的IP
 
 ---
 
+## 企业微信（字段与 CMS 一一对应）
+
+在「设置 → 通知（企业微信）」里，可以直接照 CMS 那一页抄：
+
+| 本项 | CMS 里的名字 | 作用 |
+|---|---|---|
+| 企业ID | 企业ID | `ww...`，获取 access_token 用 |
+| 应用Secret | 应用Secret | 同上，只保存不显示 |
+| 应用ID | 应用ID | AgentID，发消息用 |
+| API代理 | API代理 | `http://ip:port` 走正向代理；反代域名则替换接口基址，两种都自动识别 |
+| Token | Token | **接收消息**验签用 |
+| EncodingAESKey | EncodingAESKey | **接收消息**解密用，43 位 |
+| 接收人 | —（CMS 没有） | `@all` 或 UserID，多个用竖线分隔 |
+
+**只想收推送**：只要前三项 + 接收人，Token / EncodingAESKey 留空即可。
+
+**还想在微信里发链接让它入库**：把 Token / EncodingAESKey 填成和企业微信后台完全一样，然后把「API 接收消息 URL」填进企业微信后台。
+
+- 本项目的回调地址：`https://你的域名/api/wecom/callback`
+- **兼容 CMS 的地址**：`https://你的域名/api/wx/message?source=wx` 也是同一个入口，按 CMS 配过的不必改 URL
+
+常见报错：
+
+| errcode | 含义 | 处理 |
+|---|---|---|
+| 60020 | 出口 IP 不在「企业可信IP」 | 把 NAS 出口 IP（或 API 代理的出口 IP）加进应用的可信 IP |
+| 40013 | 企业ID 不对 | 检查 `ww` 开头那串 |
+| 40056 / 60011 | 应用ID 不对或应用不在可见范围 | 检查 AgentID、应用可见范围 |
+| 81013 | 接收人不存在 | 检查 UserID，或先用 `@all` |
+
+> 配置完点「发送测试消息」，失败时会直接把企业微信返回的 errcode 显示出来，不用去翻日志。
+
+---
+
 ## 常见问题
 
 **Q：为什么还要填 115 Cookie？不是全官方了吗？**

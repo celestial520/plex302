@@ -736,7 +736,7 @@
             · 同一目录静置 <b>90 秒</b> 再扫，期间每来一个新事件就重新计时（整理没停就一直等）<br>
             · 单目录最多等 <b>10 分钟</b>，避免一直有事件就永远不扫<br>
             · 扫完 <b>3 分钟</b> 后复核一次，接住晚落盘的字幕 / 花絮<br>
-            · 每次拉 100 条、最多翻 5 页；任意两次 115 请求至少隔 <b>2.05 秒</b>（和 CMS 的 2 秒对齐）
+            · 每次拉 100 条；任意两次 115 请求至少隔 <b>5 秒</b>（对齐 CMS 的「api时间设置 5~9 秒」），大量积压时才加密翻页
           </div>
         </div>
       `, true)}
@@ -766,13 +766,28 @@
         <div class="field full"><div class="result-box" id="full-run-result">全量同步会按媒体库逐个调用 Plex <code>/library/sections/&lt;id&gt;/refresh</code>（不带 path）。库大时 Plex 会把整棵树重新读一遍，经 CD2 落到 115 就是成千上万次目录读取，和 CMS 抢额度，所以默认关闭。</div></div>
       `)}
 
-      ${section('通知（企业微信）', '', `
+      ${section('通知（企业微信）', '字段与 CMS 完全对应，可以照着 CMS 那一页抄过来。', `
+        <div class="callout info" style="margin-bottom:14px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+            <b>API 接收消息 URL</b>
+            <code id="wecom-callback-url">${esc((state.status && state.status.wecom_callback) || (location.origin + '/api/wecom/callback'))}</code>
+            <button class="btn ghost sm" id="btn-copy-callback">复制</button>
+          </div>
+          企业微信后台 → 应用 → 接收消息 → 设置 API 接收：URL 填这个，<b>Token</b> 与 <b>EncodingAESKey</b> 填下面两行，两边必须一字不差。<br>
+          已经按 CMS 配过的不用改 URL：本项目的 <code>/api/wx/message</code> 与 CMS 是同一个入口，照样能用。
+        </div>
         <div class="form-rows">
-          <div class="form-row-line"><label>企业ID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, '')}</div>
+          <div class="form-row-line"><label>企业ID</label>${input('cfg-wecom-corpid', c.notify.wecom_corpid, 'ww...')}</div>
           <div class="form-row-line"><label>应用Secret</label>${input('cfg-wecom-secret', '', c.notify.wecom_secret_set ? '已保存，留空不修改' : '', 'password')}</div>
-          <div class="form-row-line"><label>应用ID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '')}</div>
-          <div class="form-row-line"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '')}</div>
-          <div class="form-row-line"><label>API代理</label>${input('cfg-wecom-proxy', c.notify.wecom_proxy, '')}</div>
+          <div class="form-row-line"><label>应用ID</label>${input('cfg-wecom-agentid', c.notify.wecom_agentid, '1000002')}</div>
+          <div class="form-row-line"><label>API代理</label>
+            <div class="cell-stack">${input('cfg-wecom-proxy', c.notify.wecom_proxy, 'http://1.2.3.4:8981 或 https://wecom.example.com')}
+              <span class="desc">填 CMS 那种 <code>http://ip:port</code> 会当正向代理走；填反代域名会当接口基址。两种都支持，会自动识别。</span>
+            </div>
+          </div>
+          <div class="form-row-line"><label>Token</label>${input('cfg-wecom-token', c.notify.wecom_token, '接收消息的 Token（可留空，只推送不接收）')}</div>
+          <div class="form-row-line"><label>EncodingAESKey</label>${input('cfg-wecom-aes', '', c.notify.wecom_aes_key_set ? '已保存，留空不修改' : '43 位，接收消息用')}</div>
+          <div class="form-row-line"><label>接收人</label>${input('cfg-wecom-touser', c.notify.wecom_touser, '@all 或 UserID，多个用 | 分隔')}</div>
           <div class="form-row-line"><label>状态</label>
             <label class="switch"><input type="checkbox" id="cfg-wecom-enabled" ${c.notify.wecom_enabled ? 'checked' : ''}><i></i></label>
           </div>
@@ -780,6 +795,7 @@
         <div class="form-rows" style="margin-top:18px">
           <div class="form-row-line"><span></span><button class="btn sm" id="btn-notify-test"><svg><use href="#i-bell"></use></svg>发送测试消息</button></div>
         </div>
+        <div class="result-box" id="notify-test-result" style="margin-top:8px">还没测试。失败时会显示企业微信返回的 errcode，例如 60020 = 出口 IP 不在「企业可信IP」里。</div>
       `, true)}
 
       ${section('网络与安全', '判断「这个请求是不是局域网」用，决定给他 302 还是回源 Plex。', `
@@ -956,12 +972,21 @@
     const notifyBtn = $('#btn-notify-test');
     if (notifyBtn) notifyBtn.addEventListener('click', async () => {
       const out = $('#notify-test-result');
-      out.textContent = '发送中…';
+      if (out) out.textContent = '发送中…';
       try {
         await api('/api/notify/test', { method: 'POST', body: {} });
-        out.textContent = '已发送，去企业微信看看';
+        if (out) out.textContent = '已发送，去企业微信看看。没收到就检查「应用可见范围」是否包含接收人。';
         toast('测试消息已发送', 'ok');
-      } catch (err) { out.textContent = err.message || '发送失败'; }
+      } catch (err) {
+        if (out) out.textContent = err.message || '发送失败';
+        toast(err.message || '发送失败', 'bad');
+      }
+    });
+    const copyCb = $('#btn-copy-callback');
+    if (copyCb) copyCb.addEventListener('click', () => {
+      const el = $('#wecom-callback-url');
+      copyText(el ? el.textContent.trim() : '');
+      toast('回调地址已复制', 'ok');
     });
     $$('[data-theme-seg] button').forEach((b) => b.addEventListener('click', () => applyTheme(b.dataset.mode)));
     applyTheme(themeMode(), false);
@@ -1107,6 +1132,8 @@
     if (val('cfg-wecom-secret')) c.notify.wecom_secret = val('cfg-wecom-secret');
     c.notify.wecom_touser = val('cfg-wecom-touser') || '@all';
     c.notify.wecom_proxy = val('cfg-wecom-proxy');
+    c.notify.wecom_token = val('cfg-wecom-token');
+    if (val('cfg-wecom-aes')) c.notify.wecom_aes_key = val('cfg-wecom-aes');
 
     c.u115.recent_enabled = c.events.recent_fallback;
     if (val('cfg-115-cookie')) c.u115.cookie = val('cfg-115-cookie');

@@ -82,10 +82,17 @@ def _xml_text(root: ET.Element, tag: str) -> str:
     return (node.text or "").strip() if node is not None else ""
 
 
+def _callback_keys(cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """回调 Token / EncodingAESKey：统一放在 notify 下，兼容老配置的 ingest。"""
+    n = cfg.get("notify") or {}
+    i = cfg.get("ingest") or {}
+    token = str(n.get("wecom_token") or i.get("wecom_token") or "").strip()
+    aes_key = str(n.get("wecom_aes_key") or i.get("wecom_aes_key") or "").strip()
+    return token, aes_key
+
+
 def verify_url(cfg: Dict[str, Any], params: Dict[str, str]) -> str:
-    ing = cfg["ingest"]
-    token = str(ing.get("wecom_token") or "")
-    aes_key = str(ing.get("wecom_aes_key") or "")
+    token, aes_key = _callback_keys(cfg)
     signature = params.get("msg_signature") or ""
     timestamp = params.get("timestamp") or ""
     nonce = params.get("nonce") or ""
@@ -100,8 +107,7 @@ def verify_url(cfg: Dict[str, Any], params: Dict[str, str]) -> str:
 def handle_message(cfg: Dict[str, Any], body: bytes, params: Dict[str, str]) -> str:
     """返回要回给企业微信的 XML（已加密）。"""
     ing = cfg["ingest"]
-    token = str(ing.get("wecom_token") or "")
-    aes_key = str(ing.get("wecom_aes_key") or "")
+    token, aes_key = _callback_keys(cfg)
     signature = params.get("msg_signature") or ""
     timestamp = params.get("timestamp") or ""
     nonce = params.get("nonce") or ""

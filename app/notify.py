@@ -31,12 +31,76 @@ def _truncate(text: str, limit: int = 1800) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+# 企业微信「API代理」两种填法都支持：
+#   ① 正向代理  http://1.2.3.4:8981   （CMS 里就是这个，请求走代理出网）
+#   ② 反代基址  https://wecom.example.com（自己搭的反向代理，替换 qyapi 域名）
+# 以前只按 ② 处理，填 ① 会把 http://ip:port 当接口域名，必然失败。
+_PROXY_MODE: Dict[str, str] = {}
+
+
+def _wecom_proxy(cfg: Dict[str, Any]) -> str:
+    return str(cfg["notify"].get("wecom_proxy") or "").strip().rstrip("/")
+
+
 def _wecom_base(cfg: Dict[str, Any]) -> str:
-    proxy = str(cfg["notify"].get("wecom_proxy") or "").strip().rstrip("/")
+    proxy = _wecom_proxy(cfg)
     return proxy or DEFAULT_WECOM_BASE
 
 
+def _wecom_call(
+    cfg: Dict[str, Any],
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> Dict[str, Any]:
+    """调企业微信 API。代理填法不确定时两种都试，成功的模式记住复用。"""
+    proxy = _wecom_proxy(cfg)
+    if not proxy:
+        modes = [""]
+    elif proxy in _PROXY_MODE:
+        modes = [_PROXY_MODE[proxy]]
+    else:
+        modes = ["base", "forward"]
+    last: Optional[Exception] = None
+    for mode in modes:
+        url = f"{proxy}{path}" if mode == "base" else f"{DEFAULT_WECOM_BASE}{path}"
+        kwargs: Dict[str, Any] = {"timeout": timeout}
+        if mode == "forward":
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        if params is not None:
+            kwargs["params"] = params
+        if json_body is not None:
+            kwargs["json"] = json_body
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except requests.RequestException as err:
+            last = err
+            continue
+        if resp.status_code >= 400:
+            last = requests.RequestException(f"HTTP {resp.status_code}")
+            continue
+        try:
+            data = resp.json()
+        except ValueError:
+            last = requests.RequestException("返回不是 JSON（代理地址可能填成了网页地址）")
+            continue
+        if proxy:
+            _PROXY_MODE[proxy] = mode
+            logger.info(
+                f"[通知] 企业微信 API 代理按「{'反代基址' if mode == 'base' else '正向代理'}」使用：{proxy}"
+            )
+        return data
+    raise requests.RequestException(str(last) if last else "企业微信请求失败")
+
+
+_last_token_error = ""
+
+
 def _access_token(cfg: Dict[str, Any]) -> Optional[str]:
+    global _last_token_error
     notify = cfg["notify"]
     corpid = str(notify.get("wecom_corpid") or "").strip()
     secret = str(notify.get("wecom_secret") or "").strip()
@@ -48,19 +112,19 @@ def _access_token(cfg: Dict[str, Any]) -> Optional[str]:
         if _token_cache["token"] and _token_cache["key"] == cache_key and _token_cache["expire_at"] > now:
             return _token_cache["token"]
     try:
-        resp = requests.get(
-            f"{_wecom_base(cfg)}/cgi-bin/gettoken",
-            params={"corpid": corpid, "corpsecret": secret},
-            timeout=15,
+        data = _wecom_call(
+            cfg, "GET", "/cgi-bin/gettoken", params={"corpid": corpid, "corpsecret": secret}, timeout=15
         )
-        data = resp.json()
-    except (requests.RequestException, ValueError) as err:
+    except requests.RequestException as err:
+        _last_token_error = f"网络/代理不可用（{err}）"
         logger.warn(f"[通知] 获取企业微信 token 失败：{err}")
         return None
     token = data.get("access_token")
     if not token:
-        logger.warn(f"[通知] 企业微信 token 返回异常：{data.get('errcode')} {data.get('errmsg')}")
+        _last_token_error = f"{data.get('errcode')} {data.get('errmsg')}"
+        logger.warn(f"[通知] 企业微信 token 返回异常：{_last_token_error}")
         return None
+    _last_token_error = ""
     with _lock:
         _token_cache.update(
             {
@@ -83,7 +147,10 @@ def send_wecom(title: str, content: str, force: bool = False) -> Optional[str]:
         return "企业微信配置不完整（CorpID / Secret / AgentID 必填）"
     token = _access_token(cfg)
     if not token:
-        return "获取企业微信 access_token 失败"
+        detail = _last_token_error or "请检查企业ID / 应用Secret"
+        if "60020" in detail or "not allow to access" in detail.lower():
+            detail += "（企业微信要求「可信IP」：把 NAS 出口 IP 或 API 代理的 IP 加进应用的可信IP）"
+        return f"获取 access_token 失败：{detail}"
     payload = {
         "touser": str(notify.get("wecom_touser") or "@all"),
         "msgtype": "text",
@@ -92,14 +159,10 @@ def send_wecom(title: str, content: str, force: bool = False) -> Optional[str]:
         "text": {"content": _truncate(f"{title}\n{content}")},
     }
     try:
-        resp = requests.post(
-            f"{_wecom_base(cfg)}/cgi-bin/message/send",
-            params={"access_token": token},
-            json=payload,
-            timeout=20,
+        data = _wecom_call(
+            cfg, "POST", "/cgi-bin/message/send", params={"access_token": token}, json_body=payload, timeout=20
         )
-        data = resp.json()
-    except (requests.RequestException, ValueError) as err:
+    except requests.RequestException as err:
         return f"企业微信发送异常：{err}"
     if data.get("errcode") not in (0, None):
         return f"企业微信返回错误：{data.get('errcode')} {data.get('errmsg')}"
