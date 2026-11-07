@@ -42,6 +42,20 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages requests
           python3 tests/test_plex_token.py
 
+      - name: 路径映射回归（映射错了要能指出错在哪一层）
+        run: |
+          set -e
+          python3 -c 'import requests' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages requests
+          python3 tests/test_path_map.py
+
+      - name: 事件循环不许被阻塞（慢 Plex / 慢企业微信）
+        run: |
+          set -e
+          python3 -c 'import requests' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages requests
+          python3 tests/test_no_block.py
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 

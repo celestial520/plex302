@@ -22,7 +22,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.12"
+VERSION = "1.8.13"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -543,6 +543,76 @@ async def api_resolve(request: Request) -> Any:
 
 
 # --------------------------------------------------------------------- 测试
+@app.get("/api/diag/paths")
+async def api_diag_paths() -> Any:
+    """路径映射体检：拿 Plex 自己上报的媒体库路径，跟配置里的①前缀对一遍。
+
+    映射错是最常见的「播不了、日志空白」原因，而且它不会报错，只会静默回源。
+    这里把两边摆在一起，错在哪一层直接指出来。
+    """
+    cfg = config.load()
+    try:
+        secs = await asyncio.to_thread(plex.sections, True)
+    except plex.PlexError as err:
+        return _err(f"读取 Plex 媒体库失败：{err}")
+
+    mounts = cfg["mounts"] or []
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for sec in secs:
+        for loc in sec.get("locations") or []:
+            loc = str(loc).replace("\\", "/").rstrip("/")
+            if not loc or loc in seen:
+                continue
+            seen.add(loc)
+            best = ""
+            for m in mounts:
+                pre = str(m.get("plex_prefix") or "")
+                if pre and (loc == pre or loc.startswith(pre + "/")):
+                    if len(pre) > len(best):
+                        best = pre
+            sample = loc + "/示例影片/示例.mkv"
+            cloud = resolver.resolver.map_path(cfg, sample) if best else ""
+            rows.append(
+                {
+                    "section": sec.get("title") or "",
+                    "location": loc,
+                    "matched": bool(best),
+                    "plex_prefix": best,
+                    "cloud_sample": cloud or "",
+                    "extra": loc[len(best):].strip("/") if best else "",
+                }
+            )
+
+    hints: List[str] = []
+    if not mounts:
+        hints.append("没有配置任何路径映射：所有播放都会回源 Plex（走 NAS 上传，能播但吃带宽）。")
+    elif not rows:
+        hints.append("Plex 没有返回媒体库路径，可能是 token 权限不足或媒体库还没建好。")
+    for r in rows:
+        if r["matched"]:
+            continue
+        hints.append(
+            f"Plex 媒体库路径 {r['location']} 没有命中任何①前缀 —— 这个库里的片都会回源。"
+            f"把 ① 改成 {r['location']} 即可（② 按网盘里对应的目录填）。"
+        )
+    unused = [
+        m.get("plex_prefix")
+        for m in mounts
+        if m.get("plex_prefix") and not any(r["plex_prefix"] == m.get("plex_prefix") for r in rows)
+    ]
+    for pre in unused:
+        hints.append(f"①前缀 {pre} 在 Plex 媒体库里找不到对应路径，多半填错了。")
+    for r in rows:
+        if r["matched"] and r["extra"] and r["cloud_sample"].startswith("/" + r["extra"] + "/"):
+            hints.append(
+                f"{r['location']} 在 ①{r['plex_prefix']} 之后还多一层「{r['extra']}」。"
+                f"如果这层是 CD2 的挂载点名（如 115open），它不是网盘文件夹 —— "
+                f"应该 ①填 {r['location']}、②填 /，否则云盘路径会多出 /{r['extra']}。"
+            )
+    return _ok({"rows": rows, "mounts": mounts, "hints": hints, "sections": len(secs)})
+
+
 @app.post("/api/test/link")
 async def api_test_link(request: Request) -> Any:
     body = await request.json()

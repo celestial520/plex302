@@ -99,6 +99,26 @@ def _wecom_call(
 _last_token_error = ""
 
 
+def _send_later(title: str, content: str) -> None:
+    """后台线程发通知，绝不在事件循环里同步等 HTTP。
+
+    踩过的坑：notify_error 从 asyncio 的轮询循环里直接调 send_wecom，
+    企业微信（或自建代理）一旦连不上，requests 会阻塞 15~40 秒；这段时间
+    uvicorn 的事件循环被整个占住 —— 播放解析、WebUI 登录、日志接口全部排队，
+    表现就是「播放卡住 + 工具进不去 + 日志空白」。通知是旁路，不该有这种权力。
+    """
+    def _run() -> None:
+        try:
+            err = send_wecom(title, content)
+        except Exception as exc:  # noqa: BLE001
+            logger.warn(f"[通知] 后台发送异常：{exc}")
+            return
+        if err:
+            logger.warn(f"[通知] {err}")
+
+    threading.Thread(target=_run, name="notify-send", daemon=True).start()
+
+
 def _access_token(cfg: Dict[str, Any]) -> Optional[str]:
     global _last_token_error
     notify = cfg["notify"]
@@ -239,7 +259,7 @@ async def flush_loop() -> None:
     while True:
         try:
             await asyncio.sleep(FLUSH_SECONDS)
-            flush()
+            await asyncio.to_thread(flush)
         except asyncio.CancelledError:
             return
         except Exception as err:  # noqa: BLE001
@@ -256,9 +276,7 @@ def notify_full(total: int, ok: int, failed: int, elapsed: float, details: str =
         lines.append("")
         lines.append(details)
     title = "Plex302 · 全量同步完成" if not failed else "Plex302 · 全量同步有失败"
-    err = send_wecom(title, "\n".join(lines))
-    if err:
-        logger.warn(f"[通知] {err}")
+    _send_later(title, "\n".join(lines))
 
 
 def notify_error(message: str, key: str = "error", cooldown: int = 1800) -> None:
@@ -270,9 +288,7 @@ def notify_error(message: str, key: str = "error", cooldown: int = 1800) -> None
     if _last_error_at.get(key, 0) > now - cooldown:
         return
     _last_error_at[key] = now
-    err = send_wecom("Plex302 · 需要处理", message)
-    if err:
-        logger.warn(f"[通知] {err}")
+    _send_later("Plex302 · 需要处理", message)
 
 
 def test() -> Dict[str, Any]:

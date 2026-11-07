@@ -7,13 +7,21 @@ import ipaddress
 import re
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import config, logger, plex, providers, store
 
 PART_RE = re.compile(r"^/library/parts/(\d+)/", re.I)
 START_RE = re.compile(r"^/video/:/transcode/universal/start", re.I)
+
+
+# 拿 Plex 路径（part_file / search_file / item_file）走线程 + 硬超时。
+# 这几个函数内部是同步 requests，超时分别是 10s / 12s / 10s；
+# 以前直接在 async 函数里调，会把整个事件循环堵死十几秒 —— 表现就是
+# 「播放卡住的同时 WebUI 也打不开、日志一片空白」，因为 /login、/health
+# 全都排在同一个循环里。现在丢到线程池，并给一个不超过播放器耐心的上限。
+PLEX_PATH_TIMEOUT = 6.0
 
 
 class TTLCache:
@@ -120,6 +128,65 @@ class Resolver:
         return None
 
     @staticmethod
+    def explain_mapping(cfg: Dict[str, Any], plex_path: str) -> Dict[str, Any]:
+        """把「路径 → 映射 → 云盘路径」每一步摊开，专门用来查映射错。
+
+        映射错的时候 map_path 只会返回 None，然后静默回源 Plex —— 用户看到的是
+        「播不了、日志也没东西」。这里把 Plex 自己上报的媒体库路径和配置里的前缀
+        摆在一起对比，错在哪一层一眼能看出来。
+        """
+        path = "/" + unquote(str(plex_path or "")).replace("\\", "/").strip("/")
+        mounts = cfg.get("mounts", []) or []
+        cloud = Resolver.map_path(cfg, path)
+
+        # Plex 自己上报的媒体库根路径：这是「①Plex 前缀」的唯一事实来源
+        plex_locations: List[str] = []
+        try:
+            for sec in plex.sections():
+                plex_locations.extend(sec.get("locations") or [])
+        except Exception as err:  # noqa: BLE001
+            logger.warn(f"[映射] 读取 Plex 媒体库路径失败：{err}")
+        plex_locations = sorted({str(x).replace("\\", "/").rstrip("/") for x in plex_locations if x})
+
+        hits = []
+        for m in mounts:
+            pre = str(m.get("plex_prefix") or "")
+            if pre and (path == pre or path.startswith(pre + "/")):
+                hits.append(pre)
+        echo = next((m for m in mounts if str(m.get("plex_prefix") or "") in hits), None)
+
+        hints: List[str] = []
+        if not mounts:
+            hints.append("还没有配置任何路径映射，所有播放都会回源 Plex。")
+        elif not hits:
+            hints.append(f"Plex 给的是 {plex_path}，不在任何①前缀下，所以直接回源了。")
+            for loc in plex_locations:
+                if loc and (path == loc or path.startswith(loc + "/")):
+                    hints.append(f"看起来应该用 ①{loc}（Plex 媒体库里就是这个路径）。")
+                    break
+        if echo and cloud:
+            extra = path[len(str(echo.get("plex_prefix") or "")):].lstrip("/")
+            first = extra.split("/", 1)[0] if extra else ""
+            cloud_pref = str(echo.get("cloud_prefix") or "/").strip("/")
+            if first and not cloud_pref and extra.count("/") > 0:
+                hints.append(
+                    f"注意：①之后还剩一层「{first}」。如果 {first} 是 CD2 的挂载点名（比如 115open），"
+                    f"它并不是网盘里的文件夹 —— 这时应该 ①填 {echo.get('plex_prefix')}/{first}、②填 /，"
+                    f"否则云盘路径会多出 /{first} 这一层。"
+                )
+        return {
+            "plex_path": path,
+            "cloud_path": cloud,
+            "mounts": [
+                {"plex_prefix": m.get("plex_prefix"), "cloud_prefix": m.get("cloud_prefix") or "/"}
+                for m in mounts
+            ],
+            "plex_locations": plex_locations,
+            "matched_prefix": hits[0] if hits else "",
+            "hints": hints,
+        }
+
+    @staticmethod
     def map_cd2_path(cfg: Dict[str, Any], plex_path: str) -> Optional[str]:
         path = "/" + unquote(str(plex_path or "")).replace("\\", "/").strip("/")
         for mount in cfg.get("mounts", []):
@@ -201,9 +268,15 @@ class Resolver:
     def explain(self, plex_path: str, ip: str = "", ua: str = "") -> Dict[str, Any]:
         cfg = config.load()
         cloud = self.map_path(cfg, plex_path)
-        out: Dict[str, Any] = {"plex_path": plex_path, "cloud_path": cloud, "provider": cfg["provider"]["type"]}
+        diag = self.explain_mapping(cfg, plex_path)
+        out: Dict[str, Any] = {
+            "plex_path": plex_path,
+            "cloud_path": cloud,
+            "provider": cfg["provider"]["type"],
+            "mapping": diag,
+        }
         if not cloud:
-            out.update({"ok": False, "error": "路径不在任何挂载映射里"})
+            out.update({"ok": False, "error": "路径不在任何挂载映射里", "hints": diag["hints"]})
             return out
         try:
             link = providers.resolve(cfg, cloud, providers.ResolveContext(ip=ip, ua=ua))
@@ -245,17 +318,31 @@ class Resolver:
         if self.is_lan(ip) and not cfg["server"].get("redirect_lan"):
             return self._proxy("局域网客户端，交给 Plex 直接播放")
 
-        try:
+        if not part_match and self._arg(args, "directPlay") == "0":
+            return self._proxy("客户端明确要求转码")
+
+        def _work() -> str:
+            """同步部分：查 part → 文件路径。必须在线程里跑，不能堵事件循环。"""
             if part_match:
-                plex_path = self._cached_part(part_match.group(1), token, uri)
-            else:
-                if self._arg(args, "directPlay") == "0":
-                    return self._proxy("客户端明确要求转码")
-                plex_path = self._resolve_start_path(args, token)
+                return self._cached_part(part_match.group(1), token, uri)
+            return self._resolve_start_path(args, token)
+
+        try:
+            plex_path = await asyncio.wait_for(
+                asyncio.to_thread(_work), timeout=PLEX_PATH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            store.bump_stat("proxied")
+            logger.warn(f"[302] 向 Plex 要文件路径超时（>{PLEX_PATH_TIMEOUT:g} 秒），本次回源：{uri}")
+            return self._proxy("查询 Plex 文件路径超时")
         except plex.PlexError as err:
             store.bump_stat("error")
             logger.warn(f"[302] 获取 Plex 路径失败：{err}")
             return self._proxy(f"Plex 路径解析失败：{err}")
+        except Exception as err:  # noqa: BLE001
+            store.bump_stat("error")
+            logger.warn(f"[302] 获取 Plex 路径异常：{err}")
+            return self._proxy(f"Plex 路径解析异常：{err}")
 
         if not plex_path:
             return self._proxy("Plex 没有返回文件路径")
@@ -264,6 +351,12 @@ class Resolver:
 
         cloud_path = self.map_path(cfg, plex_path)
         if not cloud_path:
+            # 以前这里静默回源，用户只看得到「播不了、日志空白」。映射错是最常见
+            # 的起播失败原因，必须留痕，并把 Plex 的真实路径一起打出来。
+            prefixes = ", ".join(str(m.get("plex_prefix") or "-") for m in cfg["mounts"]) or "无"
+            logger.warn(
+                f"[302] 路径映射未命中，回源 Plex：{plex_path}（当前①前缀：{prefixes}）"
+            )
             return self._proxy("文件不在已配置的 CD2 挂载映射内")
 
         ua_for_cache = providers._ua(cfg, providers.ResolveContext(ip=ip, ua=ua))  # noqa: SLF001

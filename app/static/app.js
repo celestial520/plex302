@@ -665,7 +665,12 @@
           <span></span>
         </div></div>
         <div class="field full" id="mount-list">${mountRows}</div>
-        <div class="field full"><button class="btn sm" id="btn-add-mount"><svg><use href="#i-plus"></use></svg>添加一条映射</button></div>
+        <div class="field full"><div class="field-row">
+          <button class="btn sm" id="btn-add-mount"><svg><use href="#i-plus"></use></svg>添加一条映射</button>
+          <button class="btn sm ghost" id="btn-diag-paths"><svg><use href="#i-events"></use></svg>对照 Plex 实际路径</button>
+          <span class="desc">不确定①该填什么？点右边这个，直接读 Plex 自己上报的媒体库路径来对比。</span>
+        </div></div>
+        <div class="field full"><div class="result-box" id="diag-paths-result" style="display:none"></div></div>
       `, true)}
 
       ${section('115 官方接口（播放直链）', '播放时由 115 开放平台按完整路径直接返回直链，和 plex-demo 同一条链路：一次请求定位，不列目录、不占网页 Cookie 的风控额度。access_token 每 2 小时自动续期。', `
@@ -892,6 +897,46 @@
           : `<span style="color:var(--red)">${esc(res.data.message || '连接失败')}</span>`;
       } catch (err) { el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`; }
     });
+    const diagBtn = $('#btn-diag-paths');
+    if (diagBtn) diagBtn.addEventListener('click', async () => {
+      const box = $('#diag-paths-result');
+      box.style.display = '';
+      box.className = 'result-box';
+      box.textContent = '正在读取 Plex 媒体库路径…';
+      try {
+        const res = await api('/api/diag/paths');
+        const d = res.data || {};
+        const rows = d.rows || [];
+        let html = '';
+        if (rows.length) {
+          html += rows.map((r) => `<div class="diag-row ${r.matched ? 'ok' : 'bad'}">`
+            + `<b>${esc(r.section || '媒体库')}</b>`
+            + `<code>${esc(r.location)}</code>`
+            + (r.matched
+              ? `<span class="ok-tag">✓ 命中 ①${esc(r.plex_prefix)} → 云盘 ${esc(r.cloud_sample)}</span>`
+              : `<span class="bad-tag">✗ 没有命中任何①前缀</span>`
+                + `<button class="btn ghost sm diag-use" data-loc="${esc(r.location)}">用 ${esc(r.location)} 作①</button>`)
+            + '</div>').join('');
+        } else {
+          html += '<div>Plex 没有返回媒体库路径（检查 X-Plex-Token 权限）。</div>';
+        }
+        if (d.hints && d.hints.length) {
+          html += '<ul class="diag-hints">' + d.hints.map((h) => `<li>${esc(h)}</li>`).join('') + '</ul>';
+        }
+        box.className = 'result-box';
+        box.innerHTML = html;
+        box.querySelectorAll('.diag-use').forEach((btn) => btn.addEventListener('click', () => {
+          const input = document.querySelector('#mount-list .mount-plex');
+          if (!input) { toast('先添加一条映射', 'bad'); return; }
+          input.value = btn.dataset.loc;
+          toast('已填入①，记得看一下②是否对应网盘目录，然后保存', 'ok');
+        }));
+      } catch (err) {
+        box.className = 'result-box bad';
+        box.textContent = err.message || '读取失败';
+      }
+    });
+
     $('#btn-test-link').addEventListener('click', async () => {
       const path = $('#cfg-test-path').value.trim();
       const box = $('#link-test-result');
@@ -900,13 +945,19 @@
       box.textContent = '解析中…';
       try {
         const res = await api('/api/test/link', { method: 'POST', body: { path } });
+        const m = res.data.mapping || {};
+        const lines = [`Plex 路径：${res.data.plex_path || path}`];
+        if (m.matched_prefix) lines.push(`命中①前缀：${m.matched_prefix}`);
+        else if (m.mounts && m.mounts.length) lines.push(`没有命中任何①前缀（当前：${m.mounts.map((x) => x.plex_prefix).join(' / ')}）`);
+        lines.push(`云盘路径：${res.data.cloud_path || '—'}`);
         if (res.data.ok) {
           box.className = 'result-box ok';
-          box.textContent = `云盘路径：${res.data.cloud_path}\n直链：${res.data.url}`;
+          box.innerHTML = esc(lines.join('\n')) + `\n直链：<a href="${esc(res.data.url)}" target="_blank" rel="noreferrer">${esc(String(res.data.url).slice(0, 90))}…</a>`;
           copyText(res.data.url);
         } else {
           box.className = 'result-box bad';
-          box.textContent = `${res.data.error || '解析失败'}\n云盘路径：${res.data.cloud_path || '—'}`;
+          box.textContent = lines.join('\n') + `\n原因：${res.data.error || '解析失败'}`
+            + ((res.data.hints && res.data.hints.length) ? '\n\n' + res.data.hints.join('\n') : '');
         }
       } catch (err) {
         box.className = 'result-box bad';
