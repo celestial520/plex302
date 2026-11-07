@@ -176,9 +176,11 @@ class Organizer:
         for item in others:
             stem = os.path.splitext(item["name"])[0]
             parent = os.path.dirname(item["path"])
+            # 字幕文件名跟的是**原始视频名**，不是重命名后的目标名。
+            # 以前拿 p["to"] 去比，永远匹配不上，字幕会被全部丢进冗余。
             mate = next((p for p in out["plans"]
                          if p["action"] == "move" and os.path.dirname(p["from"]) == parent
-                         and os.path.splitext(os.path.basename(p["to"]))[0] == stem), None)
+                         and os.path.splitext(os.path.basename(p["from"]))[0] == stem), None)
             if mate and "." + item["ext"] in sub_exts:
                 target = os.path.splitext(mate["to"])[0] + "." + item["ext"]
                 plan = {"action": "move", "from": item["path"], "to": target, "reason": "字幕跟随", "id": item["id"]}
@@ -193,11 +195,20 @@ class Organizer:
                 out[{"move": "moved", "junk": "junk"}.get(plan["action"], "failed")] += 1
             touched_dirs.add(parent)
 
-        # 整理完成后删除待整理目录内的空文件夹。只处理 walk 出来的目录
-        # （绝不碰媒体库），删除前逐个列目录确认为空；上限防止请求数失控。
+        # 只清理「本轮确实有文件被移走的」空目录。用户要求不要动其它空目录
+        # （那些留给他自己手动删）。删除前仍逐个列目录确认为空；只处理 walk
+        # 出来的待整理目录内子目录，绝不碰媒体库；上限防止请求数失控。
         if org.get("delete_empty", True):
             limit = max(0, int(org.get("max_empty_checks") or 50))
-            for d in tree["dirs"][:limit]:
+            checked = 0
+            for d in tree["dirs"]:
+                if d["path"] not in touched_dirs and not any(
+                    t.startswith(d["path"] + "/") for t in touched_dirs
+                ):
+                    continue
+                if checked >= limit:
+                    break
+                checked += 1
                 try:
                     empty = not openfs.list_dir(cfg, d["id"])
                 except openfs.OpenFSError as err:

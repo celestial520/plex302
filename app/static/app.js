@@ -820,7 +820,7 @@
         <div class="field full">
           ${switchLine('启用定时自动整理', '关闭时只会响应你手动点的按钮，绝不自动动文件', 'cfg-org-enabled', !!o.enabled)}
           ${switchLine('预览模式（只出计划，不移动）', '强烈建议先保持打开；关掉后「立即整理」才会真的移动文件', 'cfg-org-dry', o.dry_run !== false)}
-          ${switchLine('整理后删除空文件夹', '只删待整理目录内、确认已空的子目录；不会碰媒体库', 'cfg-org-clean', o.delete_empty !== false)}
+          ${switchLine('整理后删除空文件夹', '只删本轮移走文件后变空的目录，逐个确认已空；其它空目录不碰，留给你手动删', 'cfg-org-clean', o.delete_empty !== false)}
           ${switchLine('忽略非媒体库目录的 115 事件', '冗余数据 / 已存在 / 待整理等目录的变动直接跳过，不再反查目录、不再刷「映射不到」告警，也不会拖慢起播', 'cfg-events-only-media', c.events.only_media_paths !== false)}
         </div>
         <div class="field"><label>整理周期</label>${dur('cfg-org-interval', o.interval || 3600)}</div>

@@ -86,7 +86,9 @@ check("前端留空保留旧密钥", merged["organize"]["tmdb"]["api_key"] == "T
 print("=== 5) 整理：预览不写、执行才写 ===")
 FILES = [
     {"id": "f1", "name": "Iron.Man.2008.1080p.mkv", "ext": "mkv", "size": 10 ** 9,
-     "is_dir": False, "path": "/待整理/Iron.Man.2008.1080p.mkv"},
+     "is_dir": False, "path": "/待整理/子目录/Iron.Man.2008.1080p.mkv"},
+    {"id": "f5", "name": "Iron.Man.2008.1080p.srt", "ext": "srt", "size": 1024,
+     "is_dir": False, "path": "/待整理/子目录/Iron.Man.2008.1080p.srt"},
     {"id": "f2", "name": "已存在片.2020.1080p.mkv", "ext": "mkv", "size": 10 ** 9,
      "is_dir": False, "path": "/待整理/已存在片.2020.1080p.mkv"},
     {"id": "f3", "name": "乱七八糟的名字.mkv", "ext": "mkv", "size": 10 ** 9,
@@ -95,7 +97,8 @@ FILES = [
      "is_dir": False, "path": "/待整理/封面.jpg"},
 ]
 TREE = {"files": FILES, "dirs": [
-    {"id": "d1", "name": "子目录", "path": "/待整理/子目录", "is_dir": True}
+    {"id": "d1", "name": "子目录", "path": "/待整理/子目录", "is_dir": True},
+    {"id": "d2", "name": "手动空目录", "path": "/待整理/手动空目录", "is_dir": True},
 ]}
 
 FAKE_INFO = {"title": "钢铁侠", "year": "2008", "tmdb_id": "1726", "first_letter": "G",
@@ -131,7 +134,7 @@ with mock.patch.object(openfs, "ensure_dir", side_effect=lambda c, p, create=Tru
      mock.patch.object(mediarec, "recognize", side_effect=fake_recognize):
     org = organizer.Organizer()
     dry = org.run(cfg, True)
-    check("预览扫描到 4 个文件", dry["scanned"] == 4, dry["scanned"])
+    check("预览扫描到 5 个文件", dry["scanned"] == 5, dry["scanned"])
     check("预览不调用移动", not m_move.called)
     check("预览不调用重命名", not m_rename.called)
     check("预览不调用删除", not m_delete.called)
@@ -143,7 +146,11 @@ with mock.patch.object(openfs, "ensure_dir", side_effect=lambda c, p, create=Tru
     check("电影落到 /media/电影/分类 下",
           any("/media/电影/外语电影/" in p["to"] for p in dry["plans"] if p["action"] == "move"),
           [p["to"] for p in dry["plans"] if p["action"] == "move"])
-    check("空目录在预览里只统计不删", dry["deleted_dirs"] == 1, dry["deleted_dirs"])
+    check("字幕跟随主视频一起改名移动",
+          any(p["action"] == "move" and p["to"].endswith(".srt") and "/media/电影/" in p["to"]
+              for p in dry["plans"]),
+          [p["to"] for p in dry["plans"] if p["to"].endswith(".srt")])
+    check("只统计本轮动过的空目录（无关空目录不碰）", dry["deleted_dirs"] == 1, dry["deleted_dirs"])
 
 with mock.patch.object(openfs, "ensure_dir", side_effect=lambda c, p, create=True: "cid-target"), \
      mock.patch.object(openfs, "walk", side_effect=lambda c, cid, p: TREE), \
@@ -157,7 +164,10 @@ with mock.patch.object(openfs, "ensure_dir", side_effect=lambda c, p, create=Tru
     real = org2.run(cfg, False)
     check("执行时确实调用了官方移动接口", m_move2.called)
     check("执行时确实调用了官方重命名接口", m_rename2.called)
-    check("执行时删除了空目录", m_delete2.called)
+    check("只删了本轮动过的那一个空目录", m_delete2.call_count == 1, m_delete2.call_count)
+    check("删的是子目录 d1，不是用户手动建的 d2",
+          m_delete2.call_args_list and m_delete2.call_args_list[0][0][1] == ["d1"],
+          m_delete2.call_args_list)
     check("执行结果 ok", real["ok"] is True, real["errors"])
 
 print("=== 6) 默认安全值 ===")
