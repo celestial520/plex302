@@ -45,9 +45,10 @@ jobs:
       - name: 路径映射 + 事件循环回归
         run: |
           set -e
-          # 这两个用例要 import app.main（含 FastAPI 路由），依赖装齐再跑
-          python3 -c 'import fastapi, requests, qrcode' 2>/dev/null \
-            || python3 -m pip install --quiet --break-system-packages fastapi requests qrcode
+          # 这两个用例要 import app.main，等于把整个应用装一遍；
+          # 直接用 requirements.txt，别一个个点依赖（少一个就 red）
+          python3 -c 'import grpc, qrcode, fastapi' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages -r requirements.txt
           python3 tests/test_path_map.py
           python3 tests/test_no_block.py
 
