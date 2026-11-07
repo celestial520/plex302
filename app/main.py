@@ -22,7 +22,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.14"
+VERSION = "1.8.15"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -611,6 +611,55 @@ async def api_diag_paths() -> Any:
                 f"应该 ①填 {r['location']}、②填 /，否则云盘路径会多出 /{r['extra']}。"
             )
     return _ok({"rows": rows, "mounts": mounts, "hints": hints, "sections": len(secs)})
+
+
+@app.get("/api/diag/part")
+async def api_diag_part(part: str = "", token: str = "") -> Any:
+    """量一下「向 Plex 要文件路径」这一步：耗时、状态码、原始返回。
+
+    播放卡住时，外面只能看到「查询 Plex 文件路径超时」，看不出是网络慢、
+    token 不对，还是 Plex 自己在这个文件上卡住。这里把三次真实请求摊开。
+    """
+    cfg = config.load()
+    saved = str(cfg["plex"].get("token") or "")
+    base = str(cfg["plex"].get("url") or "")
+    out: Dict[str, Any] = {
+        "plex_url": base,
+        "part": part,
+        "token_used": "客户端传入" if token else "配置里保存的",
+    }
+
+    async def probe(path: str) -> Dict[str, Any]:
+        t0 = time.time()
+
+        def _do() -> Dict[str, Any]:
+            try:
+                resp = plex.request("GET", path, token=(token or saved) or None, timeout=20)
+                body = resp.text[:300]
+                return {
+                    "ok": True,
+                    "status": resp.status_code,
+                    "ctype": resp.headers.get("Content-Type") or "",
+                    "body_head": body,
+                }
+            except Exception as err:  # noqa: BLE001
+                return {"ok": False, "error": f"{type(err).__name__}: {err}"}
+
+        result = await asyncio.to_thread(_do)
+        result["elapsed"] = round(time.time() - t0, 2)
+        return result
+
+    out["identity"] = await probe("/identity")
+    if part:
+        out["part_raw"] = await probe(f"/library/parts/{part}")
+        t0 = time.time()
+        try:
+            path = await asyncio.to_thread(plex.part_file, part, (token or saved) or None)
+            out["part_file"] = {"ok": True, "path": path, "elapsed": round(time.time() - t0, 2)}
+            out["mapped"] = resolver.Resolver.map_path(cfg, path)
+        except Exception as err:  # noqa: BLE001
+            out["part_file"] = {"ok": False, "error": f"{type(err).__name__}: {err}", "elapsed": round(time.time() - t0, 2)}
+    return _ok(out)
 
 
 @app.get("/api/selftest")

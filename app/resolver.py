@@ -236,14 +236,18 @@ class Resolver:
             return str(cached)
         try:
             path = plex.part_file(part_id, token=token or None)
-        except plex.PlexError:
-            # 少数 Plex 版本不返回 /library/parts/{id} 的 file，用文件名兜底搜索
+        except plex.PlexError as err:
+            # 以前这里把原因吞了，日志只剩一句「查询路径超时」，根本没法定位。
+            # part 查询失败通常是：Plex 太慢（文件在慢挂载上）、token 不对、
+            # 或 Plex 版本不给 file 字段。先记下来，再走文件名兜底。
+            logger.warn(f"[302] Plex part {part_id} 查询失败：{err}（尝试按文件名兜底）")
             name = ""
             m = re.match(r"^/library/parts/\d+/\d+/(.+)$", uri)
             if m:
                 name = unquote(m.group(1)).rsplit("/", 1)[-1]
             path = plex.search_file(name, token=token or None) if name else None
             if not path:
+                logger.warn(f"[302] 按文件名兜底也没找到：{name or '(无文件名)'}")
                 raise
         ttl = config.load()["advanced"]["part_cache_ttl"]
         self.part_cache.set(part_id, path, ttl)
