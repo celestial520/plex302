@@ -54,6 +54,10 @@ PATH_BLOCK_TTL = 600.0
 _path_block: Dict[str, float] = {}
 _path_block_lock = threading.Lock()
 RISK_WAIT_CAP = 120.0  # 单次最多睡这么久，避免后台任务被挂太久
+# 冷却剩余超过这个值就不再「睡等」，直接抛错让调用方快速回退。
+# 曾经的问题：播放解析遇到 405 冷却，pace() 先睡 120 秒，njs 那边一直等，
+# 播放器早就断了；日志里也什么都看不到。宁可这次回源 Plex，也不要卡死。
+RISK_FAST_FAIL = 3.0
 # 请求间隔加 0~20% 抖动：恒定 2.05 秒的机械节奏本身就是风控特征
 GAP_JITTER = 0.2
 
@@ -164,8 +168,16 @@ def pace(fast: bool = False) -> None:
     """所有 115 请求的统一节流闸门（含 405 风控退避）。
 
     保持单参数签名：外部（含回归测试）可能 patch 这个函数来跳过节流。
+
+    风控冷却期不再「睡等」：剩余时间短（<=3 秒）就等完，剩下较久直接抛错，
+    让播放快速回源、后台任务下一轮再来。否则一个 405 就能把播放卡死两分钟。
     """
-    _risk_wait()
+    with _risk_lock:
+        left = _risk_until - time.monotonic()
+    if left > RISK_FAST_FAIL:
+        raise Web115RiskError(f"115 风控冷却中（还剩 {int(left)} 秒），本次请求已跳过")
+    if left > 0:
+        time.sleep(left)
     _pace_gap(fast)
 
 
@@ -490,7 +502,8 @@ def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
     if cached is not None:
         return cached
     lock = _resolve_lock(path)
-    if not lock.acquire(timeout=20):
+    if not lock.acquire(timeout=8):
+        logger.warn(f"[115] 同一路径解析排队超时（>8 秒），本次回源：{path}")
         raise Web115Error("115 目录解析排队超时，稍后重试")
     try:
         return _resolve_file_locked(cfg, path)
