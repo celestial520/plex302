@@ -308,6 +308,42 @@ A：这是 v1.8.12 及以前的阻塞 bug，v1.8.13 已修。当时解析播放�
 - 根治：拉 v1.8.13，播放路径查询丢进线程 + 6 秒硬超时，通知改成后台线程发送，慢后端只影响自己
 - 判断是不是这一类问题：`docker exec plex302 curl -s -o /dev/null -w '%{http_code} %{time_total}\n' http://127.0.0.1:999/health`，如果这个都超过 2 秒，就是事件循环被堵了
 
+**Q：播放一直失败，怎么一次定位？**
+A：在 NAS 上跑一条命令，它会从 Plex 里随便取一个真实视频，把整条链路走一遍：
+
+```bash
+docker exec -it plex302 python -m app.selftest
+```
+
+输出形如：
+
+```
+1. ✓ Plex Token 已配置
+2. ✓ 115 官方接口已登录        selftop（剩余 7200 秒）
+3. ✓ 路径映射已配置            ①/mnt/cd2/115/media → ②/media
+4. ✓ 从 Plex 取一个真实视频    电影/沙丘2 → /mnt/cd2/115/media/电影/沙丘2.mkv
+5. ✓ 路径映射命中              → /media/电影/沙丘2.mkv
+6. ✓ 115 按路径定位到文件       pick_code=xxxx
+7. ✓ 115 返回直链              来源=115open
+8. ✓ 直链真的能下载            HTTP 206 · video/x-matroska · 收到 1024 字节
+```
+
+**哪一步红，就是哪一步的问题**，并且会直接给出改法。可以只测某个文件：
+
+```bash
+docker exec -it plex302 python -m app.selftest --path "/mnt/cd2/115/media/电影/xxx.mkv"
+```
+
+自检全绿但播放器还是不行，那问题在客户端或 Plex 远程访问，不在 302：
+
+```bash
+docker logs plex302 2>&1 | grep Plex302 | tail -5
+```
+
+- 有 `action=redirect` → 302 生效了，看直链是否被客户端拒绝（UA 绑定）
+- 有 `action=proxy reason=...` → 看 reason，多半是映射/排版
+- **一行都没有** → 播放请求根本没到 plex302，检查 Plex「自定义服务器访问 URL」是否指向 32500 入口
+
 **Q：映射路径填错了会怎样？怎么检查？**
 A：会「静默回源 Plex」——播放走 NAS 上传，不报错，看着就像 302 坏了。v1.8.13 起：
 

@@ -51,6 +51,7 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages -r requirements.txt
           python3 tests/test_path_map.py
           python3 tests/test_no_block.py
+          python3 tests/test_selftest.py
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

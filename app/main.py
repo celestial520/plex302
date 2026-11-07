@@ -16,13 +16,13 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
-    scanner, scheduler, store, u115events, u115open, u115ops, u115web, u115weblogin,
+    scanner, scheduler, selftest, store, u115events, u115open, u115ops, u115web, u115weblogin,
     watcher,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.13"
+VERSION = "1.8.14"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -611,6 +611,21 @@ async def api_diag_paths() -> Any:
                 f"应该 ①填 {r['location']}、②填 /，否则云盘路径会多出 /{r['extra']}。"
             )
     return _ok({"rows": rows, "mounts": mounts, "hints": hints, "sections": len(secs)})
+
+
+@app.get("/api/selftest")
+async def api_selftest(path: str = "", ua: str = "") -> Any:
+    """播放链路自检：Plex 文件 → 映射 → 115 定位 → 直链 → 真下 1KB。
+
+    播放失败时外面只能看到「回源了」，看不出断在哪。这个接口每一步都给结论，
+    和 `docker exec plex302 python -m app.selftest` 是同一套逻辑。
+    """
+    try:
+        rep = await asyncio.to_thread(selftest.run, path or None, ua or "", 20.0)
+    except Exception as err:  # noqa: BLE001
+        logger.warn(f"[自检] 运行异常：{err}")
+        return _err(f"自检运行异常：{err}")
+    return _ok({"ok": rep.ok, "steps": rep.steps})
 
 
 @app.post("/api/test/link")

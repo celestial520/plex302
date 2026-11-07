@@ -710,6 +710,13 @@
           <div class="field-row">${input('cfg-test-path', '', '/mnt/cd2/115/电影/沙丘2 (2024)/沙丘2.mkv')}<button class="btn sm" id="btn-test-link">测试</button></div>
           <div class="result-box" id="link-test-result" style="margin-top:8px">还没有测试</div>
         </div>
+        <div class="field full"><label>播放链路自检</label>
+          <div class="field-row">
+            <button class="btn sm" id="btn-selftest"><svg><use href="#i-play"></use></svg>跑一遍完整链路</button>
+            <span class="desc">自动从 Plex 取一个真实视频，走「定位文件 → 路径映射 → 115 直链 → 真下载 1KB」。播不了就点这个，哪一步红就是哪一步的问题。</span>
+          </div>
+          <div class="result-box" id="selftest-result" style="margin-top:8px">还没跑。也可以在终端跑：<code>docker exec -it plex302 python -m app.selftest</code></div>
+        </div>
       `, true)}
 
 
@@ -897,6 +904,29 @@
           : `<span style="color:var(--red)">${esc(res.data.message || '连接失败')}</span>`;
       } catch (err) { el.innerHTML = `<span style="color:var(--red)">${esc(err.message)}</span>`; }
     });
+    const selfBtn = $('#btn-selftest');
+    if (selfBtn) selfBtn.addEventListener('click', async () => {
+      const box = $('#selftest-result');
+      box.className = 'result-box';
+      box.textContent = '正在跑完整链路（最多 30 秒）…';
+      try {
+        const res = await api('/api/selftest');
+        const d = res.data || {};
+        const steps = d.steps || [];
+        box.className = 'result-box ' + (d.ok ? 'ok' : 'bad');
+        box.innerHTML = steps.map((x, i) => `<div class="diag-row ${x.ok ? 'ok' : 'bad'}">`
+          + `<b>${i + 1}. ${x.ok ? '✓' : '✗'} ${esc(x.step)}</b>`
+          + (x.detail ? `<span class="${x.ok ? 'ok-tag' : 'bad-tag'}">${esc(x.detail)}</span>` : '')
+          + (!x.ok && x.fix ? `<ul class="diag-hints"><li>${esc(x.fix)}</li></ul>` : '')
+          + '</div>').join('')
+          + (d.ok ? '<div class="diag-hints"><li>链路是通的：如果播放器还是不行，问题在客户端 / Plex 远程访问，不在 302。</li></div>' : '');
+        toast(d.ok ? '链路全通' : '有步骤失败，看红字', d.ok ? 'ok' : 'bad');
+      } catch (err) {
+        box.className = 'result-box bad';
+        box.textContent = err.message || '自检失败';
+      }
+    });
+
     const diagBtn = $('#btn-diag-paths');
     if (diagBtn) diagBtn.addEventListener('click', async () => {
       const box = $('#diag-paths-result');
