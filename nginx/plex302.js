@@ -134,32 +134,30 @@ function routeSet(key, url, ttlSec) {
 }
 
 // ------------------------------------------------------------ 工具
-const RESOLVE_TIMEOUT_MS = 10000;
-
 async function askResolver(r, body) {
-    const pending = ngx.fetch(rt.resolver + '/api/resolve', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Internal-Token': rt.token
-        },
-        body: JSON.stringify(body),
-        max_response_body_size: 65536
-    }).then(function (res) {
-        return res.ok ? res.json() : null;
-    }).catch(function () {
-        return null;
-    });
-    // 后端进程整个卡死时（例如 999 不监听/死锁），ngx.fetch 会一直悬着，
-    // 客户端只能干等，日志里也不会留下任何东西。这里加一道硬上限：
-    // 超时当作「没解析到」，走下面的回源分支并写一条 [回源] 日志。
-    if (typeof setTimeout !== 'function') return await pending;
-    const limit = new Promise(function (resolve) {
-        setTimeout(function () {
-            resolve({ action: 'proxy', reason: 'resolver-timeout(nginx)' });
-        }, RESOLVE_TIMEOUT_MS);
-    });
-    return await Promise.race([pending, limit]);
+    // 超时交给 nginx 的 js_fetch_timeout（模板里 10s），后端 /api/resolve 自己
+    // 也有 8s 硬上限。这里以前用 Promise.race + setTimeout 兜底，但 njs 的
+    // 定时器是绑在请求生命周期上的：即便 fetch 已经秒回，请求也要等定时器
+    // 触发才 finalize —— 每次没命中缓存的起播都白等整整 10 秒，播放器因此
+    // 大量 499 提前断开。去掉这个多余定时器后，首播从 10s 降到百毫秒级。
+    try {
+        const res = await ngx.fetch(rt.resolver + '/api/resolve', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Internal-Token': rt.token
+            },
+            body: JSON.stringify(body),
+            max_response_body_size: 65536
+        });
+        if (!res.ok) {
+            return { action: 'proxy', reason: 'resolver-http-' + res.status };
+        }
+        return await res.json();
+    } catch (e) {
+        // fetch 超时 / 后端没监听：一律回源 Plex，绝不把 500 甩给播放器
+        return { action: 'proxy', reason: 'resolver-timeout(nginx)' };
+    }
 }
 
 function proxyToPlex(r) {

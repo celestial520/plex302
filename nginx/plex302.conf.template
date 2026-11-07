@@ -15,7 +15,7 @@ server {
 
     resolver 223.5.5.5 119.29.29.29 valid=300s ipv6=off;
     js_fetch_verify off;
-    js_fetch_timeout 20s;
+    js_fetch_timeout 10s;
 
     client_max_body_size 0;
 
