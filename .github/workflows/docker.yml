@@ -42,18 +42,13 @@ jobs:
             || python3 -m pip install --quiet --break-system-packages requests
           python3 tests/test_plex_token.py
 
-      - name: 路径映射回归（映射错了要能指出错在哪一层）
+      - name: 路径映射 + 事件循环回归
         run: |
           set -e
-          python3 -c 'import requests' 2>/dev/null \
-            || python3 -m pip install --quiet --break-system-packages requests
+          # 这两个用例要 import app.main（含 FastAPI 路由），依赖装齐再跑
+          python3 -c 'import fastapi, requests, qrcode' 2>/dev/null \
+            || python3 -m pip install --quiet --break-system-packages fastapi requests qrcode
           python3 tests/test_path_map.py
-
-      - name: 事件循环不许被阻塞（慢 Plex / 慢企业微信）
-        run: |
-          set -e
-          python3 -c 'import requests' 2>/dev/null \
-            || python3 -m pip install --quiet --break-system-packages requests
           python3 tests/test_no_block.py
 
       - name: Set up Buildx
