@@ -99,7 +99,7 @@ def _wecom_call(
 _last_token_error = ""
 
 
-def _send_later(title: str, content: str) -> None:
+def _send_later(title: str, content: str, on_failure=None) -> None:
     """后台线程发通知，绝不在事件循环里同步等 HTTP。
 
     踩过的坑：notify_error 从 asyncio 的轮询循环里直接调 send_wecom，
@@ -112,9 +112,14 @@ def _send_later(title: str, content: str) -> None:
             err = send_wecom(title, content)
         except Exception as exc:  # noqa: BLE001
             logger.warn(f"[通知] 后台发送异常：{exc}")
+            if on_failure:
+                on_failure()
             return
         if err:
             logger.warn(f"[通知] {err}")
+            if on_failure:
+                on_failure()
+            return
 
     threading.Thread(target=_run, name="notify-send", daemon=True).start()
 
@@ -288,7 +293,13 @@ def notify_error(message: str, key: str = "error", cooldown: int = 1800) -> None
     if _last_error_at.get(key, 0) > now - cooldown:
         return
     _last_error_at[key] = now
-    _send_later("Plex302 · 需要处理", message)
+
+    def _undo() -> None:
+        # 企业微信/代理一次抖动不该占用 30 分钟冷却，否则这段时间里
+        # Cookie 失效、事件积压、扫描入队失败等告警会被静默丢掉。
+        _last_error_at.pop(key, None)
+
+    _send_later("Plex302 · 需要处理", message, on_failure=_undo)
 
 
 def test() -> Dict[str, Any]:

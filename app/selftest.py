@@ -166,7 +166,9 @@ def run(path: Optional[str] = None, ua: str = "", timeout: float = 20.0) -> Repo
         return rep
 
     # 6) 真的下 1KB —— 这一步才代表「能不能播」
-    ok, detail = _probe_url(link.url, ua, timeout=timeout)
+    # 直链绑定的是「换直链时用的 UA」而不是随便一个 UA。ua_mode=fixed 时
+    # 用客户端 ua 去探测会 403，自检把本来正常的链路误判成红的。
+    ok, detail = _probe_url(link.url, providers._ua(cfg, ctx), timeout=timeout)
     rep.add(
         "直链真的能下载", ok, detail,
         "UA 不匹配（115 直链绑定 UA）：把设置里的 UA 模式改回「跟随客户端」；"

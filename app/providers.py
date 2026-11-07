@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs
 
 from . import logger, u115open, u115web
@@ -56,6 +57,10 @@ def _resolve_115(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> L
     # 直接用 u115web 缓存里算好的剩余寿命（已按直链自带过期时间留了 1 分钟余量），
     # 让 nginx 后面的 302 缓存和直链缓存同时过期，避免播放中途再打一次 115。
     expires_in = int(info.get("expires_in") or 0)
+    if expires_in <= 0:
+        # 兜底通道拿到已过期直链时明确回源，别让 resolver 退回默认的
+        # url_cache_ttl（1800s）把 403 链接缓存半小时。
+        raise ProviderError("115 网页接口返回的直链已过期")
     return Link(url=url, provider=f"115:{info.get('hit') or 'walk'}", expires_in=expires_in)
 
 # ------------------------------------------------------------------ 115 官方 OpenAPI
@@ -76,23 +81,38 @@ _PICK_TTL = 6 * 3600.0
 
 
 def _open_url_ttl(url: str) -> float:
-    """从 115 直链的 t=<过期时间戳> 读真实寿命，读不到给 1 小时。"""
+    """从 115 直链的 t=<过期时间戳> 读真实寿命；读不到给 1 小时，已过期给 0。
+
+    以前用 max(300, ...) 把剩余不足 5 分钟的寿命抬到 300 秒，且 t 已过期时
+    直接落到默认 1 小时 —— 三层缓存会一起把过期直链继续 302 给播放器，
+    表现为播放中途 403 / 反复重试。TTL 绝不能超过直链真实剩余寿命。
+    """
     try:
         qs = parse_qs(url.split("?", 1)[1])
         stamp = int((qs.get("t") or ["0"])[0])
-        if stamp > time.time():
-            return max(300.0, min(_OPEN_TTL_MAX, stamp - time.time() - 60))
+        if stamp <= 0:
+            return _OPEN_TTL_DEFAULT
+        left = stamp - time.time() - 60  # 提前 1 分钟失效
+        if left <= 0:
+            return 0.0
+        return min(_OPEN_TTL_MAX, left)
     except (IndexError, ValueError):
-        pass
-    return _OPEN_TTL_DEFAULT
+        return _OPEN_TTL_DEFAULT
 
 
 def _open_lock(key: str) -> threading.Lock:
     with _open_guard:
         lock = _open_locks.get(key)
         if lock is None:
-            lock = threading.Lock()
-            _open_locks[key] = lock
+            if len(_open_locks) > 20000:
+                # 只淘汰空闲锁。整表 clear() 会把正在被持有的锁对象丢掉，
+                # 后来的请求拿到同 key 的新锁，单飞失效、并发重复打 115。
+                for k, l in list(_open_locks.items()):
+                    if not l.locked():
+                        _open_locks.pop(k, None)
+            lock = _open_locks.get(key)
+            if lock is None:
+                lock = _open_locks[key] = threading.Lock()
         return lock
 
 
@@ -137,8 +157,47 @@ def _pick_cache_drop(path: str) -> None:
         _pick_cache.pop(path, None)
 
 
+# 115 偶发长尾：线上实测同样一次 downurl 有 0.4s 和 5.29s 两种结果，
+# 而这段开销是串在「首次播放某个 (文件, UA) 组合」里的，播放器只能干等。
+# 做请求对冲：超过 HEDGE_AFTER 还没回来就并发再问一次，取先到的结果。
+# 只在长尾时触发，正常 0.3~0.5 秒的请求完全不受影响；downurl 是读接口，
+# 重复请求幂等。用独立有界线程池，不占用 asyncio.to_thread 的默认池。
+_HEDGE_AFTER = 1.2
+_HEDGE_MAX_WAIT = 6.5
+_HEDGE_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix="p115-hedge")
+
+
+def _download_hedged(cfg: Dict[str, Any], pick: str, ua: str) -> Tuple[str, str]:
+    futures = [_HEDGE_POOL.submit(u115open.download_url, cfg, pick, ua)]
+    # 必须用 FIRST_COMPLETED：wait 默认 ALL_COMPLETED，会把快结果硬等到慢的
+    # 那个也回来，对冲就白做了。
+    done, _ = wait(futures, timeout=_HEDGE_AFTER, return_when=FIRST_COMPLETED)
+    if not done:
+        logger.info(f"[115Open] 直链请求超过 {_HEDGE_AFTER:g}s，并发重试一次以压缩长尾")
+        futures.append(_HEDGE_POOL.submit(u115open.download_url, cfg, pick, ua))
+    last: Optional[Exception] = None
+    deadline = time.monotonic() + _HEDGE_MAX_WAIT
+    while futures:
+        done, pending = wait(
+            futures, timeout=max(0.0, deadline - time.monotonic()),
+            return_when=FIRST_COMPLETED,
+        )
+        if not done:
+            break
+        for f in done:
+            try:
+                return f.result()
+            except Exception as err:  # noqa: BLE001
+                last = err
+        # 先回来的那个失败了：继续等备用请求，别急着把错误抛出去
+        futures = list(pending)
+    if last is not None:
+        raise last
+    raise u115open.Open115Error("115 直链请求超时")
+
+
 def _open_link_url(cfg: Dict[str, Any], pick: str, ua: str) -> str:
-    """pick_code → 直链，带缓存 + 单飞：并发起播只打一次 115。"""
+    """pick_code → 直链，带缓存 + 单飞 + 长尾对冲：并发起播只打一次 115。"""
     key = f"{pick}|{ua}"
     cached = _open_cache_get(key)
     if cached:
@@ -152,8 +211,10 @@ def _open_link_url(cfg: Dict[str, Any], pick: str, ua: str) -> str:
         cached = _open_cache_get(key)
         if cached:
             return cached
-        url, _name = u115open.download_url(cfg, pick, ua)
-        _open_cache_put(key, url, _open_url_ttl(url))
+        url, _name = _download_hedged(cfg, pick, ua)
+        ttl = _open_url_ttl(url)
+        if ttl > 0:
+            _open_cache_put(key, url, ttl)
         return url
     finally:
         lock.release()
@@ -187,6 +248,18 @@ def _resolve_open115(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) 
     if cfg["provider"].get("force_https") and url.startswith("http://"):
         url = "https://" + url[len("http://"):]
     ttl = _open_url_ttl(url)
+    if ttl <= 0:
+        # 115 偶尔会复用一条已过期的直链。再要一次；仍然过期就明确回源，
+        # 绝不能把会 403 的链接 302 给播放器（拖动进度条时尤其明显）。
+        try:
+            url, _ = u115open.download_url(cfg, pick, ua)
+            ttl = _open_url_ttl(url)
+            if ttl > 0:
+                _open_cache_put(f"{pick}|{ua}", url, ttl)
+        except u115open.Open115Error:
+            ttl = 0.0
+    if ttl <= 0:
+        raise ProviderError("115 返回的直链已过期")
     return Link(url=url, provider="115open", expires_in=int(ttl))
 
 

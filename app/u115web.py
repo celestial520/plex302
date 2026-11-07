@@ -483,8 +483,15 @@ _resolve_locks_guard = threading.Lock()
 def _resolve_lock(key: str) -> threading.Lock:
     with _resolve_locks_guard:
         if len(_resolve_locks) > 5000:
-            _resolve_locks.clear()
-        return _resolve_locks.setdefault(key, threading.Lock())
+            # 只淘汰空闲锁：整表 clear() 会丢掉正在被持有的锁对象，
+            # 后来的请求拿到同 key 的新锁，单飞失效、并发重复打 115。
+            for k, l in list(_resolve_locks.items()):
+                if not l.locked():
+                    _resolve_locks.pop(k, None)
+        lock = _resolve_locks.get(key)
+        if lock is None:
+            lock = _resolve_locks[key] = threading.Lock()
+        return lock
 
 
 def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
@@ -502,8 +509,8 @@ def resolve_file(cfg: Dict[str, Any], cloud_path: str) -> Dict[str, Any]:
     if cached is not None:
         return cached
     lock = _resolve_lock(path)
-    if not lock.acquire(timeout=8):
-        logger.warn(f"[115] 同一路径解析排队超时（>8 秒），本次回源：{path}")
+    if not lock.acquire(timeout=6):
+        logger.warn(f"[115] 同一路径解析排队超时（>6 秒），本次回源：{path}")
         raise Web115Error("115 目录解析排队超时，稍后重试")
     try:
         return _resolve_file_locked(cfg, path)
@@ -596,7 +603,11 @@ def download_url(cfg: Dict[str, Any], pick_code: str, ua: str = "") -> str:
     if not url and "state" in payload and not payload.get("state"):
         # 少数版本参数名是 pickcode（没有下划线）
         payload = _get_with_ua(cfg, "/files/download", {"pickcode": pick_code}, ua)
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        data = payload.get("data")
+        if isinstance(data, list):  # 首轮处理了 list，重试分支以前会把它丢掉
+            data = data[0] if data else {}
+        if not isinstance(data, dict):
+            data = {}
         url = str(data.get("file_url") or data.get("url") or "")
     if not url:
         raise Web115Error("115 没有返回直链（pick_code 可能已失效）")
@@ -629,8 +640,13 @@ def _url_key(pick_code: str, ua: str) -> str:
 def _url_lock(key: str) -> threading.Lock:
     with _url_locks_guard:
         if len(_url_locks) > 20000:
-            _url_locks.clear()
-        return _url_locks.setdefault(key, threading.Lock())
+            for k, l in list(_url_locks.items()):
+                if not l.locked():
+                    _url_locks.pop(k, None)
+        lock = _url_locks.get(key)
+        if lock is None:
+            lock = _url_locks[key] = threading.Lock()
+        return lock
 
 
 def _expiry_from_url(url: str) -> float:
@@ -659,7 +675,11 @@ def _url_ttl(url: str) -> float:
     if not expire_at:
         return URL_TTL_DEFAULT
     ttl = expire_at - time.time() - 60  # 留 1 分钟余量，别把刚好过期的链接发出去
-    return max(URL_TTL_MIN, min(URL_TTL_MAX, ttl))
+    if ttl <= 0:
+        # 以前 max(URL_TTL_MIN, ...) 会把「剩 10 秒」抬成 300 秒，
+        # 三层缓存一起把过期直链继续 302 出去（播放器 403）。
+        return 0.0
+    return min(URL_TTL_MAX, ttl)
 
 
 def url_for_pick(cfg: Dict[str, Any], pick_code: str, ua: str = "", force: bool = False) -> str:
@@ -670,7 +690,9 @@ def url_for_pick(cfg: Dict[str, Any], pick_code: str, ua: str = "", force: bool 
         if cached:
             return cached
     lock = _url_lock(key)
-    if not lock.acquire(timeout=20):
+    # 后端 /api/resolve 总闸只有 8 秒，线程内锁不该等更久（线程无法被取消，
+    # 等满 20 秒会一直占着 to_thread 的线程池名额，拖垮 WebUI 与后续播放）。
+    if not lock.acquire(timeout=6):
         raise Web115Error("115 直链解析排队超时，稍后重试")
     try:
         if not force:

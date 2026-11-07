@@ -244,7 +244,17 @@ async function redirect2Pan(r) {
     }
 
     if (decision && decision.action === 'redirect' && decision.url) {
-        const ttl = Number(decision.cache_ttl) || 900;
+        // 以前写 || 900：后端判定「直链寿命不足」返回 cache_ttl=0 时会被当成
+        // 缺省值缓存 900 秒，把过期直链一直 302 出去。0/负数/缺失一律不写缓存，
+        // 本轮仍然 302，下一轮重新解析。
+        const ttl = Number(decision.cache_ttl) || 0;
+        if (ttl <= 0) {
+            r.headersOut['X-Plex302'] = 'redirect';
+            r.headersOut['X-Plex302-Reason'] = 'no-cache(短寿命直链)';
+            logDecision(r, 'redirect', 'no-cache', decision.url);
+            r.return(302, decision.url);
+            return;
+        }
         routeSet(key, decision.url, ttl);
         r.headersOut['X-Plex302'] = 'redirect';
         r.headersOut['X-Plex302-Reason'] = decision.reason || 'ok';

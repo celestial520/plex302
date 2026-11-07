@@ -457,12 +457,17 @@ class EventWatcher:
         if item:
             item["ready_at"] = ready
             item["section"] = section
+            # force 以前只用来算 settle=0，没写进 pending，_flush_pending 里
+            # info.get("force") 恒为 False：「立即运行」和移动/改名的旧目录
+            # 刷新会被 90 秒去重静默吞掉。
+            item["force"] = bool(force or item.get("force"))
             return
         self._pending[target] = {
             "ready_at": ready,
             "first_at": now,
             "section": section,
             "source": source,
+            "force": bool(force),
         }
 
     async def _flush_pending(self) -> None:

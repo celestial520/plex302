@@ -23,7 +23,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.20"
+VERSION = "1.8.21"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",

@@ -64,9 +64,13 @@ def request(
     except requests.RequestException as err:
         raise PlexError(f"连接 Plex 失败：{err}") from err
     if resp.status_code in (401, 403):
-        raise PlexError(_auth_error(path, resp.status_code, tok))
+        msg = _auth_error(path, resp.status_code, tok)
+        resp.close()  # stream=True 时抛错前必须关，否则连接不归还连接池
+        raise PlexError(msg)
     if resp.status_code >= 400:
-        raise PlexError(f"Plex 接口 {path} 返回 HTTP {resp.status_code}")
+        msg = f"Plex 接口 {path} 返回 HTTP {resp.status_code}"
+        resp.close()
+        raise PlexError(msg)
     return resp
 
 

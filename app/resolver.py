@@ -272,7 +272,9 @@ class Resolver:
         if m:
             rating_key = m.group(1)
         if not rating_key:
-            rating_key = self._arg(args, "ratingKey") or self._arg(args, "ratingKey")
+            # 以前两侧都取 ratingKey（复制粘贴），等于漏了 Plex start 请求
+            # 常用的 key 参数，转码请求会误判「没有 ratingKey」而回源。
+            rating_key = self._arg(args, "ratingKey") or self._arg(args, "key")
         if not rating_key:
             raise plex.PlexError("转码请求里没有 ratingKey")
         media_index = int(self._arg(args, "mediaIndex") or 0)
@@ -346,7 +348,6 @@ class Resolver:
                 asyncio.to_thread(_work), timeout=PLEX_PATH_TIMEOUT
             )
         except asyncio.TimeoutError:
-            store.bump_stat("proxied")
             logger.warn(f"[302] 向 Plex 要文件路径超时（>{PLEX_PATH_TIMEOUT:g} 秒），本次回源：{uri}")
             return self._proxy("查询 Plex 文件路径超时")
         except plex.PlexError as err:
@@ -383,10 +384,15 @@ class Resolver:
         # 单飞：Plex 起播会并发打同一个 part，只让第一个请求真的去取直链
         lock = self._resolve_locks.get(cache_key)
         if lock is None:
-            lock = self._resolve_locks[cache_key] = asyncio.Lock()
-        if len(self._resolve_locks) > 5000:
-            self._resolve_locks.clear()
-            lock = self._resolve_locks[cache_key] = asyncio.Lock()
+            if len(self._resolve_locks) > 5000:
+                # 只淘汰空闲锁。整表 clear() 会丢掉正在被持有的锁对象：
+                # 已持锁的协程和新请求各拿一把锁，单飞失效、并发重复打 115。
+                self._resolve_locks = {
+                    k: v for k, v in self._resolve_locks.items() if v.locked()
+                }
+            lock = self._resolve_locks.get(cache_key)
+            if lock is None:
+                lock = self._resolve_locks[cache_key] = asyncio.Lock()
 
         async with lock:
             cached = self.url_cache.get(cache_key)
@@ -398,15 +404,17 @@ class Resolver:
                     providers.resolve, cfg, cloud_path, providers.ResolveContext(ip=ip, ua=ua, plex_token=token)
                 )
             except providers.ProviderError as err:
-                store.bump_stat("proxied")
                 logger.warn(f"[302] 直链获取失败，回源 Plex：{cloud_path} | {err}")
                 return self._proxy(f"直链失败：{err}")
 
             ttl = int(cfg["advanced"]["url_cache_ttl"])
             if link.expires_in:
-                # 115 的 expires_in 已经是「直链缓存剩余寿命」，内部已留好余量，
-                # 这里不再二次扣减，两层缓存一起过期、一起只刷新一次。
-                ttl = max(30, min(ttl, link.expires_in))
+                # 115 的 expires_in 已经是「直链缓存剩余寿命」，内部已留好余量。
+                # 以前用 max(30, ...) 把不足 30 秒的寿命硬抬到 30 秒，导致
+                # 三条缓存一起把过期直链继续 302 出去（播放器 403）。
+                ttl = min(ttl, link.expires_in)
+            if ttl <= 0:
+                return self._proxy("115 直链剩余寿命不足")
             self.url_cache.set(cache_key, link.url, ttl)
             if cfg["advanced"].get("log_redirects"):
                 safe = self._safe_url(link.url)
@@ -430,7 +438,10 @@ class Resolver:
     @staticmethod
     def _proxy(reason: str, count: bool = True) -> Dict[str, Any]:
         if count:
-            store.bump_stat("proxied")
+            # bump_stat 只认 "proxy"，以前传 "proxied" 被静默忽略，
+            # WebUI 的「回源」数永远是 0。nginx 302.log 只统计 redirect，
+            # 所以回源在这里计一次即可，不要重复。
+            store.bump_stat("proxy")
         return {"action": "proxy", "reason": reason}
 
 

@@ -84,9 +84,22 @@ def _is_token_error(payload: Dict[str, Any]) -> bool:
 
 
 def _save(cfg: Dict[str, Any]) -> None:
-    """把 token 落盘。config.save 会 normalize + 写 runtime，失败不影响本次请求。"""
+    """只把 u115_open 字段合并进**最新磁盘配置**后落盘。
+
+    cfg 是请求开始时的 deepcopy 快照。以前直接 config.save(cfg) 会把整份旧
+    配置写回去：只要 token 刷新和用户「设置页保存」撞在一起，用户的挂载映射、
+    Plex Token、密码等就会被回滚。并发刷新时还会各拿一份旧 refresh_token 去刷。
+    这里改成以磁盘最新配置为准，只覆盖 token 相关字段。
+    """
     try:
-        config_mod.save(cfg)
+        fresh = config_mod.load(force=True)
+        src = cfg.get("u115_open") or {}
+        if src:
+            target = fresh.setdefault("u115_open", {})
+            for key in ("access_token", "refresh_token", "expires_at", "user_name", "client_id"):
+                if key in src:
+                    target[key] = src[key]
+        config_mod.save(fresh)
     except Exception as err:  # noqa: BLE001
         logger.warn(f"[115Open] 保存 token 失败：{err}")
 
@@ -113,19 +126,37 @@ def _store_token(cfg: Dict[str, Any], data: Dict[str, Any], user_name: str = "")
         o["access_token"] = access
     if refresh:
         o["refresh_token"] = refresh
-    # 提前 5 分钟视为过期，避免刚好卡在边界上
-    o["expires_at"] = int(time.time() + max(300, expires_in) - 300)
+    # 只有确实拿到新 token 才推进过期时间。以前即使 115 没返回 access_token
+    # 也把 expires_at 推到 2 小时后，于是旧（已失效）token 会被当成有效一直
+    # 用到过期，播放全数回源。
+    if access or refresh:
+        o["expires_at"] = int(time.time() + max(300, expires_in) - 300)
     if user_name:
         o["user_name"] = user_name
     _save(cfg)
 
 
-def _refresh(cfg: Dict[str, Any]) -> str:
+_last_refresh_at = 0.0
+
+
+def _refresh(cfg: Dict[str, Any], force: bool = False) -> str:
+    """在锁内以磁盘最新配置为准刷新，避免并发请求各刷一次 / 覆盖用户设置。
+
+    force=True 用于 115 明确返回 token 错误时强制续期；但 5 秒内刚刷过就不再
+    刷，否则并发的两个请求会拿已轮换的 refresh_token 连刷两次导致登录态失效。
+    """
+    global _last_refresh_at
     with _refresh_lock:
-        o = cfg.get("u115_open") or {}
+        fresh = config_mod.load(force=True)
+        o = fresh.get("u115_open") or {}
         access = str(o.get("access_token") or "")
-        if access and int(o.get("expires_at") or 0) > time.time() + 60:
-            return access  # 别的线程刚刷新过
+        just_refreshed = time.time() - _last_refresh_at < 5
+        if (
+            access
+            and int(o.get("expires_at") or 0) > time.time() + 60
+            and (not force or just_refreshed)
+        ):
+            return access
         refresh_token = str(o.get("refresh_token") or "")
         if not refresh_token:
             raise Open115Error("还没有登录 115 开放平台，先去设置页扫码", need_login=True)
@@ -136,13 +167,16 @@ def _refresh(cfg: Dict[str, Any]) -> str:
                 need_login=True,
             )
         data = payload.get("data") or {}
-        _store_token(cfg, data)
+        _store_token(fresh, data)
+        _last_refresh_at = time.time()
         logger.info("[115Open] access_token 已刷新")
         return str(data.get("access_token") or "")
 
 
 def ensure_token(cfg: Dict[str, Any]) -> str:
-    o = cfg.get("u115_open") or {}
+    # cfg 是请求开始时的快照；必须读最新配置，否则同一个请求里的多个并发调用
+    # 会一直看到旧 token 反复刷新（115 的 refresh_token 每次都会轮换）。
+    o = config_mod.load().get("u115_open") or {}
     access = str(o.get("access_token") or "")
     if access and int(o.get("expires_at") or 0) > time.time() + 60:
         return access
@@ -185,9 +219,10 @@ def _api(
 
     if not payload.get("state"):
         if retry and _is_token_error(payload):
-            o = cfg.setdefault("u115_open", {})
-            o["expires_at"] = 0  # 强制下次走刷新
-            _refresh(cfg)
+            # 以前只把请求副本里的 expires_at 置 0，刷新逻辑读的却是副本，
+            # 于是「别人刚刷新过」的判断会把这次强制刷新直接跳过，重试仍用旧
+            # token 再失败一次。改成走真正带 force 的刷新。
+            _refresh(cfg, force=True)
             return _api(cfg, method, path, data=data, params=params, ua=ua, retry=False)
         raise Open115Error(str(payload.get("message") or f"115 返回错误码 {payload.get('code')}"))
     return payload.get("data")
@@ -217,11 +252,17 @@ def download_url(cfg: Dict[str, Any], pick_code: str, ua: str = "") -> Tuple[str
     if not pick_code:
         raise Open115Error("pick_code 为空")
     data = _api(cfg, "POST", "/open/ufile/downurl", data={"pick_code": pick_code}, ua=ua or UA_FALLBACK)
+    if isinstance(data, list):  # 部分版本返回单元素数组（folder/get_info 已兼容）
+        data = data[0] if data else {}
     if isinstance(data, dict):
         for item in data.values():
             if not isinstance(item, dict):
                 continue
-            url = ((item.get("url") or {}) or {}).get("url") or item.get("url")
+            raw = item.get("url")
+            # 115 有时给 {"url": {"url": "https://..."}}，有时直接给
+            # {"url": "https://..."}。以前在字符串上调用 .get() 会抛
+            # AttributeError，扁平结构的兜底永远走不到。
+            url = (raw.get("url") if isinstance(raw, dict) else raw) or item.get("file_url")
             if isinstance(url, str) and url.startswith("http"):
                 return url, str(item.get("file_name") or "")
     raise Open115Error("115 没有返回直链（pick_code 可能已失效）")

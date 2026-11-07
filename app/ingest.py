@@ -45,7 +45,12 @@ def ingest(text: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not links:
         return {"ok": False, "error": "没找到 115 分享链接 / 磁力 / ed2k"}
 
-    cid = u115ops.ensure_dir(cfg, target)
+    # ensure_dir 会走 115 网页接口，Cookie 失效 / 风控 / 非 JSON 都会抛异常。
+    # 以前这一步在 try 之外，接口直接 500，用户只看到「入库失败」没有原因。
+    try:
+        cid = u115ops.ensure_dir(cfg, target)
+    except Exception as err:  # noqa: BLE001
+        return {"ok": False, "error": f"115 创建入库目录失败：{err}"}
     results = []
     for link in links[:5]:
         if link["type"] == "share":
