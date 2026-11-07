@@ -22,7 +22,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.15"
+VERSION = "1.8.16"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -215,21 +215,59 @@ async def api_password(request: Request) -> Any:
 
 
 # --------------------------------------------------------------------- 状态
+_STATUS_CACHE: Dict[str, Any] = {}
+_STATUS_CACHE_AT: Dict[str, float] = {}
+_STATUS_TTL = 8.0
+
+
+def _cached(key: str):
+    """status 里对 Plex / CD2 的探测结果缓存几秒。
+
+    WebUI 每几秒轮询一次 /api/status，每次都真打 Plex 和 CD2 的话，一旦对方慢，
+    asyncio 的线程池就会被这些「取消不掉」的调用占满 —— 播放解析排在后面，
+    〞只能超时回源。缓存几秒能把这类请求量压到 1/10。
+    """
+    at = _STATUS_CACHE_AT.get(key, 0.0)
+    if key in _STATUS_CACHE and time.time() - at < _STATUS_TTL:
+        return _STATUS_CACHE[key]
+    return None
+
+
+def _remember(key: str, value: Any) -> Any:
+    _STATUS_CACHE[key] = value
+    _STATUS_CACHE_AT[key] = time.time()
+    return value
+
+
 @app.get("/api/status")
 async def api_status(request: Request) -> Any:
     cfg = config.load()
     plex_status: Dict[str, Any]
-    try:
-        info = await asyncio.wait_for(asyncio.to_thread(plex.identity), timeout=6)
-        plex_status = {
-            "ok": True,
-            "version": info.get("version", ""),
-            "name": info.get("friendlyName", ""),
-            "machine_identifier": info.get("machineIdentifier", ""),
-        }
-    except Exception as err:  # noqa: BLE001
-        plex_status = {"ok": False, "error": str(err)}
-    cd2_status = await asyncio.to_thread(cd2.system_info, 4.0)
+    cached_plex = _cached("plex")
+    if cached_plex is not None:
+        plex_status = cached_plex
+    else:
+        try:
+            info = await asyncio.wait_for(asyncio.to_thread(plex.identity), timeout=4)
+            plex_status = {
+                "ok": True,
+                "version": info.get("version", ""),
+                "name": info.get("friendlyName", ""),
+                "machine_identifier": info.get("machineIdentifier", ""),
+            }
+        except Exception as err:  # noqa: BLE001
+            plex_status = {"ok": False, "error": str(err)}
+        plex_status = _remember("plex", plex_status)
+
+    cached_cd2 = _cached("cd2")
+    if cached_cd2 is not None:
+        cd2_status = cached_cd2
+    else:
+        try:
+            cd2_status = await asyncio.wait_for(asyncio.to_thread(cd2.system_info, 3.0), timeout=4)
+        except Exception as err:  # noqa: BLE001
+            cd2_status = {"ok": False, "message": f"查询超时：{err}"}
+        cd2_status = _remember("cd2", cd2_status)
     today = time.strftime("%Y-%m-%d")
     days = {row["day"]: row for row in store.stats(30)}
     today_stat = days.get(today, {"redirects": 0, "proxied": 0, "errors": 0})

@@ -21,7 +21,10 @@ START_RE = re.compile(r"^/video/:/transcode/universal/start", re.I)
 # 以前直接在 async 函数里调，会把整个事件循环堵死十几秒 —— 表现就是
 # 「播放卡住的同时 WebUI 也打不开、日志一片空白」，因为 /login、/health
 # 全都排在同一个循环里。现在丢到线程池，并给一个不超过播放器耐心的上限。
-PLEX_PATH_TIMEOUT = 6.0
+PLEX_PATH_TIMEOUT = 2.5
+# 失败过的 part 短期不再重试（默认 60 秒）。播放器起播会连发 2~3 个请求，
+# 每次失败都去问一遍 Plex 只会把线程池占满，越试越慢。
+PART_FAIL_TTL = 60.0
 
 
 class TTLCache:
@@ -78,6 +81,8 @@ class Resolver:
         # 同一部片并发起播（Plex 常一次发 2~3 个请求）只让一个去解析，
         # 其余等结果 —— 这是“一次播放只打一次 115”的关键一环。
         self._resolve_locks: Dict[str, asyncio.Lock] = {}
+        self._part_failed: Dict[str, float] = {}
+        self._part_fail_lock = threading.Lock()
         self.reload()
 
     def reload(self) -> None:
@@ -234,20 +239,49 @@ class Resolver:
         cached = self.part_cache.get(part_id)
         if cached:
             return str(cached)
+        failed = self._part_failed.get(part_id)
+        if failed and failed > time.monotonic():
+            raise plex.PlexError(f"part {part_id} 刚失败过，{int(failed - time.monotonic())} 秒内不再重试")
+        saved_token = str(config.load()["plex"].get("token") or "")
         try:
             path = plex.part_file(part_id, token=token or None)
-        except plex.PlexError as err:
-            # 以前这里把原因吞了，日志只剩一句「查询路径超时」，根本没法定位。
-            # part 查询失败通常是：Plex 太慢（文件在慢挂载上）、token 不对、
-            # 或 Plex 版本不给 file 字段。先记下来，再走文件名兜底。
-            logger.warn(f"[302] Plex part {part_id} 查询失败：{err}（尝试按文件名兜底）")
+        except plex.PlexError:
+            # 客户端带来的 token 可能是「分享/受限」的，或者根本没带。
+            # 配置里那个是服务器所有者的 token，权限最高 —— 用它再试一次，
+            # 很多 401 到这一步就通了（这也是从前 302 永远失败的一个原因）。
+            if token and saved_token and token != saved_token:
+                try:
+                    path = plex.part_file(part_id, token=saved_token)
+                    logger.info(f"[302] Plex part {part_id} 用配置里的 Token 查询成功")
+                except plex.PlexError:
+                    path = ""
+            else:
+                path = ""
+
+        if not path:
+            err = plex.PlexError(f"Plex 没有返回 part {part_id} 的文件路径")
+            # 这里以前会再用文件名去 /search 兜底，但 Plex 的 part URL 里文件名
+            # 常常就是 file.mkv，搜「file」既搜不到又极慢（12 秒），还会把
+            # 线程池吃光，导致后续播放请求连排都排不上 —— 播放就这样「从来没
+            # 成功过」。现在只在文件名像真的时才兜底，并且失败要留原因。
+            logger.warn(f"[302] Plex part {part_id} 查询失败：{err}")
             name = ""
             m = re.match(r"^/library/parts/\d+/\d+/(.+)$", uri)
             if m:
                 name = unquote(m.group(1)).rsplit("/", 1)[-1]
-            path = plex.search_file(name, token=token or None) if name else None
+            generic = (not name) or re.fullmatch(r"file\.[A-Za-z0-9]{1,5}", name) is not None
+            path = ""
+            if not generic:
+                path = plex.search_file(name, token=token or None) or ""
+                if not path:
+                    logger.warn(f"[302] 按文件名兜底也没找到：{name}")
+            else:
+                logger.warn(f"[302] 文件名是「{name or '空'}」，不适合做兜底搜索，直接回源")
             if not path:
-                logger.warn(f"[302] 按文件名兜底也没找到：{name or '(无文件名)'}")
+                with self._part_fail_lock:
+                    if len(self._part_failed) > 5000:
+                        self._part_failed.clear()
+                    self._part_failed[part_id] = time.monotonic() + PART_FAIL_TTL
                 raise
         ttl = config.load()["advanced"]["part_cache_ttl"]
         self.part_cache.set(part_id, path, ttl)
