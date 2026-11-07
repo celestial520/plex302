@@ -42,6 +42,8 @@ def request(
     timeout: float = 15.0,
     accept: str = "application/json",
     base: str | None = None,
+    stream: bool = False,
+    allow_redirects: bool = True,
 ) -> requests.Response:
     url = f"{_base(base)}{path}"
     headers = {"Accept": accept}
@@ -50,7 +52,14 @@ def request(
         headers["X-Plex-Token"] = tok
     try:
         resp = requests.request(
-            method, url, params=params, headers=headers, timeout=timeout, verify=_verify()
+            method,
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout,
+            verify=_verify(),
+            stream=stream,
+            allow_redirects=allow_redirects,
         )
     except requests.RequestException as err:
         raise PlexError(f"连接 Plex 失败：{err}") from err
@@ -175,7 +184,39 @@ def test_connection(base: str | None = None, token: str | None = None) -> Dict[s
 
 
 def part_file(part_id: str | int, token: str | None = None) -> str:
-    resp = request("GET", f"/library/parts/{part_id}", token=token, timeout=10)
+    """part id → 文件绝对路径。
+
+    坑（线上踩得很惨）：带上有效 X-Plex-Token 请求 /library/parts/<id> 时，
+    Plex 会 302 到这个媒体文件本身。requests 默认跟随重定向并且我们随后读了
+    整个响应体 —— 等于把一部几十 GB 的电影当字符串往内存里拉：请求永不返回、
+    线程被永久占住，线程池很快耗尽，于是播放一直「查询路径超时」、WebUI 也
+    跟着卡死。
+
+    所以这里必须：stream=True（不预读 body）、allow_redirects=False（不跟去下片子）、
+    而且只在 Content-Type 是 JSON/XML 时才解析。
+    """
+    resp = request(
+        "GET",
+        f"/library/parts/{part_id}",
+        token=token,
+        timeout=(5, 8),
+        stream=True,
+        allow_redirects=False,
+    )
+    if resp.status_code in (301, 302, 303, 307, 308):
+        resp.close()
+        raise PlexError(
+            f"Plex 把 part {part_id} 重定向到了媒体文件本身（HTTP {resp.status_code}），"
+            "这个接口在你这版 Plex 上取不到路径"
+        )
+    ctype = str(resp.headers.get("Content-Type") or "").lower()
+    if "json" not in ctype and "xml" not in ctype:
+        resp.close()
+        raise PlexError(f"Plex part 接口返回的不是元数据（Content-Type: {ctype or '未知'}）")
+    try:
+        resp._content = resp.raw.read(262144, decode_content=True)  # noqa: SLF001 最多读 256KB
+    finally:
+        resp.close()
     try:
         md = _as_list(_mc(resp.json()).get("Metadata"))
     except ValueError as err:

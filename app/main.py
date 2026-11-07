@@ -16,13 +16,14 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
-    scanner, scheduler, selftest, store, u115events, u115open, u115ops, u115web, u115weblogin,
+    partindex, scanner, scheduler, selftest, store, u115events, u115open, u115ops, u115web,
+    u115weblogin,
     watcher,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.16"
+VERSION = "1.8.17"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -38,6 +39,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Plex302 v{VERSION} 启动，配置目录 {config.CONFIG_DIR}")
     if created:
         logger.warn("WebUI 初始账号 admin/admin，请登录后立即修改密码")
+    # 后台建「part → 路径」索引：Plex 的 /library/parts 在有的版本上会 302 到
+    # 媒体文件本身，靠它取路径会把线程卡死；改用索引后播放直接查表。
+    partindex.start_background()
     await scanner.scanner.start()
     await watcher.watcher.start()
     await events.event_watcher.start()
@@ -281,6 +285,7 @@ async def api_status(request: Request) -> Any:
             "cd2": cd2_status,
             "u115": {"cookie_set": bool(cfg["u115"].get("cookie")), "cookie_hint": ("…" + cfg["u115"]["cookie"][-6:]) if cfg["u115"].get("cookie") else ""},
             "open115": u115open.token_state(cfg),
+            "part_index": partindex.state(),
             "provider": cfg["provider"]["type"],
             "scan_watch_on": bool(cfg["scan"].get("watch_enabled")),
             "lan_redirect": bool(cfg["server"].get("redirect_lan")),

@@ -10,7 +10,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
-from . import config, logger, plex, providers, store
+from . import config, logger, partindex, plex, providers, store
 
 PART_RE = re.compile(r"^/library/parts/(\d+)/", re.I)
 START_RE = re.compile(r"^/video/:/transcode/universal/start", re.I)
@@ -239,6 +239,14 @@ class Resolver:
         cached = self.part_cache.get(part_id)
         if cached:
             return str(cached)
+        # 先查后台建好的「part → 路径」索引：它不依赖 Plex 那个会 302 到媒体文件
+        # 的接口，命中就是零延迟。没命中就让它在后台重建，本次先回源。
+        from_index = partindex.lookup(part_id)
+        if from_index:
+            ttl = config.load()["advanced"]["part_cache_ttl"]
+            self.part_cache.set(part_id, from_index, ttl)
+            return from_index
+        partindex.ensure()
         failed = self._part_failed.get(part_id)
         if failed and failed > time.monotonic():
             raise plex.PlexError(f"part {part_id} 刚失败过，{int(failed - time.monotonic())} 秒内不再重试")
@@ -282,7 +290,7 @@ class Resolver:
                     if len(self._part_failed) > 5000:
                         self._part_failed.clear()
                     self._part_failed[part_id] = time.monotonic() + PART_FAIL_TTL
-                raise
+                raise plex.PlexError(f"取不到 part {part_id} 的文件路径")
         ttl = config.load()["advanced"]["part_cache_ttl"]
         self.part_cache.set(part_id, path, ttl)
         return path
