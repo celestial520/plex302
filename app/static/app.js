@@ -13,6 +13,8 @@
     events: [],
     tab: 'overview',
     timers: {},
+    logLevel: 'all',
+    logLoaded: false,
   };
 
   const THEME_KEY = 'p302-theme';
@@ -190,19 +192,77 @@
     } catch (err) { toast(err.message, 'bad'); }
   }
 
+  // ------------------------------------------------------------------ 日志
+  const HEALTH_FLAG = { ok: '正常', warn: '注意', bad: '不可用', off: '未启用' };
+
+  function renderLogHealth(items) {
+    const box = $('#log-health');
+    if (!box) return;
+    box.innerHTML = items.map((x) => {
+      const cls = x.state === 'ok' ? 'ok' : (x.state === 'bad' ? 'bad' : (x.state === 'warn' ? 'warn' : 'idle'));
+      const flag = HEALTH_FLAG[x.state] || '未知';
+      return `<span class="hchip ${cls}" title="${esc(x.detail)}"><span class="dot"></span>`
+        + `<b>${esc(x.name)}</b><em>${flag}</em><i>${esc(x.detail)}</i></span>`;
+    }).join('');
+  }
+
+  function renderLogProblems(summary) {
+    const box = $('#log-problems');
+    if (!box) return;
+    const bad = summary.filter((x) => x.error || x.warn);
+    if (!bad.length) {
+      box.className = 'log-problems';
+      box.innerHTML = '<span class="lp-ok">当前窗口没有错误与警告</span>';
+      return;
+    }
+    box.className = 'log-problems';
+    box.innerHTML = bad.map((x) => `<button class="lp-item ${x.error ? 'bad' : 'warn'}" data-module="${esc(x.module)}">`
+      + `<b>${esc(x.module)}</b>`
+      + (x.error ? `<span class="n bad">${x.error} 错误</span>` : '')
+      + (x.warn ? `<span class="n warn">${x.warn} 警告</span>` : '')
+      + `<i>${esc(x.last_error || ('最近 ' + (x.last || '-'))) }</i></button>`).join('');
+    box.querySelectorAll('.lp-item').forEach((el) => el.addEventListener('click', () => {
+      $('#log-module').value = el.dataset.module;
+      loadLogs();
+    }));
+  }
+
+  function renderLogModules(summary) {
+    const sel = $('#log-module');
+    if (!sel) return;
+    const cur = sel.value;
+    const names = summary.map((x) => x.module);
+    sel.innerHTML = '<option value="">全部模块</option>'
+      + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    sel.value = names.indexOf(cur) >= 0 ? cur : '';
+  }
+
   async function loadLogs() {
     try {
       const keyword = $('#log-keyword').value.trim();
-      const res = await api('/api/logs?lines=400&keyword=' + encodeURIComponent(keyword));
+      const level = state.logLevel || 'all';
+      const module = $('#log-module') ? $('#log-module').value : '';
+      const url = '/api/logs?lines=400'
+        + '&keyword=' + encodeURIComponent(keyword)
+        + '&level=' + encodeURIComponent(level)
+        + '&module=' + encodeURIComponent(module);
+      const res = await api(url);
+      const data = res.data || {};
+      if (data.health) renderLogHealth(data.health);
+      if (data.summary) { renderLogProblems(data.summary); renderLogModules(data.summary); }
+
       const box = $('#log-box');
-      const lines = res.data || [];
-      box.innerHTML = lines.length ? lines.map((line) => {
-        let cls = 'lv-INFO';
-        if (line.indexOf('| WARNING') >= 0) cls = 'lv-WARNING';
-        if (line.indexOf('| ERROR') >= 0) cls = 'lv-ERROR';
-        return `<span class="${cls}">${esc(line)}</span>`;
-      }).join('\n') : '<span class="lv-INFO">暂无日志</span>';
-      box.scrollTop = box.scrollHeight;
+      const rows = data.rows || [];
+      const stick = !state.logLoaded || (box.scrollHeight - box.scrollTop - box.clientHeight < 80);
+      box.innerHTML = rows.length ? rows.map((r) => {
+        const lv = r.level === 'ERROR' ? 'error' : (r.level === 'WARN' ? 'warn' : 'info');
+        return `<div class="log-row ${lv}"><span class="log-time">${esc(r.time || '')}</span>`
+          + `<span class="log-lv ${lv}">${esc(r.level)}</span>`
+          + `<span class="log-mod">${esc(r.module)}</span>`
+          + `<span class="log-msg">${esc(r.msg)}</span></div>`;
+      }).join('') : '<div class="log-empty">没有匹配的日志</div>';
+      if (stick) box.scrollTop = box.scrollHeight;
+      state.logLoaded = true;
     } catch (err) { /* 静默 */ }
   }
 
@@ -1139,6 +1199,23 @@
     $('#btn-save').addEventListener('click', saveConfig);
     $('#btn-log-refresh').addEventListener('click', loadLogs);
     $('#log-keyword').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLogs(); });
+    $('#log-levels').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-level]');
+      if (!btn) return;
+      state.logLevel = btn.dataset.level;
+      $('#log-levels').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+      loadLogs();
+    });
+    $('#log-module').addEventListener('change', loadLogs);
+    $('#btn-log-clear').addEventListener('click', async () => {
+      if (!confirm('清空 WebUI 的日志缓冲？磁盘上的 app.log 会保留，方便事后排查。')) return;
+      try {
+        await api('/api/logs/clear', { method: 'POST' });
+        state.logLoaded = false;
+        await loadLogs();
+        toast('日志缓冲已清空（app.log 保留）', 'ok');
+      } catch (err) { toast(err.message, 'bad'); }
+    });
 
     state.timers.status = setInterval(() => { if (state.tab === 'overview') refreshStatusOnly(); }, 15000);
     state.timers.logs = setInterval(() => {

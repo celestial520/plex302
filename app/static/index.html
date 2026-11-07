@@ -239,15 +239,24 @@
 
     <section class="view" id="view-logs">
       <div class="panel">
-        <div class="panel-head">
-          <div><h3>运行日志</h3><span class="hint">写文件并轮转，最多看最近 2000 行</span></div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <input class="input" id="log-keyword" placeholder="过滤关键字，如 302 / ERROR" style="width:220px;height:32px">
+        <div class="panel-head log-head">
+          <div><h3>运行日志</h3><span class="hint">按模块与级别分类，最多最近 2000 行</span></div>
+          <div class="log-tools">
+            <input class="input log-search" id="log-keyword" placeholder="搜索关键字，如 405 / 风控 / 电影">
+            <select class="input log-select" id="log-module"><option value="">全部模块</option></select>
+            <div class="seg" id="log-levels">
+              <button class="on" data-level="all">全部</button>
+              <button data-level="warn">重要</button>
+              <button data-level="error">错误</button>
+            </div>
             <label class="pill" style="cursor:pointer"><input type="checkbox" id="log-auto" checked style="accent-color:#7c6cff"> 自动刷新</label>
             <button class="btn sm" id="btn-log-refresh"><svg><use href="#i-refresh"></use></svg>刷新</button>
+            <button class="btn ghost sm" id="btn-log-clear"><svg><use href="#i-trash"></use></svg>清空</button>
           </div>
         </div>
         <div class="panel-body" style="padding-top:0">
+          <div class="log-health" id="log-health"></div>
+          <div class="log-problems" id="log-problems"></div>
           <div class="log-box" id="log-box">加载中…</div>
         </div>
       </div>

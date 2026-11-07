@@ -21,7 +21,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.4"
+VERSION = "1.8.5"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -901,15 +901,131 @@ def _nginx_302_lines(limit: int = 60) -> List[str]:
 
 # --------------------------------------------------------------------- 日志
 @app.get("/api/logs")
-async def api_logs(lines: int = 300, keyword: str = "") -> Any:
-    data = logger.tail(lines, keyword)
-    if not data:
-        data = logger.read_file_tail(lines)
-    if not keyword and not any(("[302]" in x or "[回源]" in x) for x in data):
-        extra = _nginx_302_lines(lines)
-        if extra:
-            data = (data + extra)[-max(1, min(int(lines), 2000)):]
-    return _ok(data)
+async def api_logs(
+    lines: int = 300, keyword: str = "", level: str = "all", module: str = ""
+) -> Any:
+    """结构化日志：每条带级别和业务模块，便于「哪里不可用、哪里出错」一眼定位。
+
+    返回里同时保留 raw（原始整行），302 决策日志和外部 grep 都能照常用。
+    """
+    cfg = config.load()
+    limit = max(1, min(int(lines), 2000))
+    raw_lines = logger.tail_lines(limit)
+    if not raw_lines:
+        # 缓冲还空（刚启动）→ 退回文件尾
+        raw_lines = logger.read_file_tail(limit)
+    if not any(("[302]" in x or "[回源]" in x) for x in raw_lines):
+        raw_lines = raw_lines + _nginx_302_lines(limit)
+    rows = [logger.parse(x) for x in raw_lines]
+    summary = logger.summarize(rows)
+    rows = logger.filter_rows(rows, keyword=keyword, level=level, module=module)
+    rows = rows[-limit:]
+    return _ok(
+        {
+            "rows": rows,
+            "summary": summary,
+            "health": _log_health(cfg),
+            "total": len(rows),
+            "counts": {
+                "all": len(rows),
+                "error": len([r for r in rows if r["level"] == "ERROR"]),
+                "warn": len([r for r in rows if r["level"] == "WARN"]),
+            },
+        }
+    )
+
+
+@app.post("/api/logs/clear")
+async def api_logs_clear() -> Any:
+    """清空 WebUI 的日志缓冲（app.log 不动，避免把现场证据清掉）。"""
+    logger.clear_ring()
+    return _ok({"cleared": True})
+
+
+def _log_health(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """日志页顶部的可用性条：只做本地判断，不发任何外部请求。
+
+    state: ok（可用）/ warn（可用但有隐患）/ bad（不可用）/ off（未启用）
+    """
+    out: List[Dict[str, Any]] = []
+
+    if cfg["plex"].get("token"):
+        out.append({"name": "Plex", "state": "ok", "detail": cfg["plex"]["url"]})
+    else:
+        out.append({"name": "Plex", "state": "bad", "detail": "未填 X-Plex-Token"})
+
+    ev_on = bool(cfg["events"].get("enabled"))
+    if not cfg["u115"].get("cookie"):
+        out.append(
+            {
+                "name": "局部入库（Cookie）",
+                "state": "bad",
+                "detail": "未填 115 Cookie，事件流水与入库都不可用",
+            }
+        )
+    elif not ev_on:
+        out.append({"name": "局部入库（Cookie）", "state": "off", "detail": "事件监听已关闭"})
+    else:
+        risk = u115web.risk_state()
+        if risk.get("active"):
+            out.append(
+                {
+                    "name": "局部入库（Cookie）",
+                    "state": "warn",
+                    "detail": f"风控退避中，还有 {risk.get('wait')} 秒",
+                }
+            )
+        else:
+            blocked = risk.get("blocked_paths") or {}
+            detail = "事件流水正常"
+            if blocked:
+                detail += f" · {len(blocked)} 个可选接口被拦"
+            out.append({"name": "局部入库（Cookie）", "state": "ok", "detail": detail})
+
+    token = u115open.token_state(cfg)
+    if token.get("logged_in"):
+        name = token.get("user_name") or "已登录"
+        left = int(token.get("expires_in") or 0)
+        detail = name if left > 0 else f"{name}（token 将自动续期）"
+        out.append({"name": "官方接口（播放）", "state": "ok", "detail": detail})
+    elif cfg["provider"].get("type") in ("open115", "mp"):
+        out.append(
+            {
+                "name": "官方接口（播放）",
+                "state": "bad",
+                "detail": "未扫码登录，播放会回退到 Cookie 逐级解析",
+            }
+        )
+    else:
+        out.append(
+            {
+                "name": "官方接口（播放）",
+                "state": "off",
+                "detail": "当前直链来源不是官方接口",
+            }
+        )
+
+    provider = str(cfg["provider"].get("type") or "none")
+    if provider == "none":
+        out.append({"name": "302 直链", "state": "off", "detail": "已关闭，全部回源 Plex"})
+    elif provider in ("open115", "mp") and not token.get("logged_in"):
+        out.append(
+            {
+                "name": "302 直链",
+                "state": "warn",
+                "detail": "来源未就绪，会回退 Cookie 逐级解析（更慢）",
+            }
+        )
+    else:
+        out.append({"name": "302 直链", "state": "ok", "detail": f"来源：{provider}"})
+
+    if cfg["cd2"].get("address"):
+        out.append({"name": "CD2", "state": "ok", "detail": cfg["cd2"]["address"]})
+    else:
+        out.append(
+            {"name": "CD2", "state": "off", "detail": "未填 gRPC，扫描前不预刷目录缓存"}
+        )
+    return out
 
 
 def _reload_nginx() -> None:
