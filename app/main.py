@@ -23,7 +23,7 @@ from . import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.19"
+VERSION = "1.8.20"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -577,11 +577,21 @@ async def api_resolve(request: Request) -> Any:
     # 8 秒拿不到结果就放弃 302、直接回源 Plex —— 能播比"看起来像 302"重要，
     # 而且这里必须留一条日志，否则用户只会看到"播放不了、日志也没有"。
     uri = str(payload.get("uri") or payload.get("path") or "")
+    started = time.monotonic()
     try:
         result = await asyncio.wait_for(resolver.resolver.resolve(payload), timeout=8.0)
     except asyncio.TimeoutError:
         logger.warn(f"[302] 解析超时（>8 秒），本次回源 Plex：{uri}")
         result = {"action": "proxy", "reason": "resolver-timeout"}
+    cost = time.monotonic() - started
+    # 只给「真的走了一轮 115」的冷解析记耗时，缓存命中不刷屏。
+    # 这条日志用来直接核对首播到底慢在哪：以前固定 10s 是 njs 定时器，
+    # 现在这里应该只有 1~2s（两次 115 往返），命中缓存则连这条都不出现。
+    if cost >= 0.3:
+        logger.info(
+            f"[302] 冷解析耗时 {cost:.2f}s | {result.get('action')} | "
+            f"{result.get('reason') or '-'} | {uri}"
+        )
     return JSONResponse(result)
 
 

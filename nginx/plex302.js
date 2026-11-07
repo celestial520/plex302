@@ -102,9 +102,14 @@ function routeKey(r, ua) {
         if (Array.isArray(v)) return v.length ? String(v[0]) : '';
         return v === undefined ? '' : String(v);
     };
+    // Plex 客户端在「决策 / 预热 / 实际播放」几轮里，同一集有时带 directPlay=1、
+    // 有时不带；decision 阶段本来就已强制 directPlay=1，所以缺省等价于 1。
+    // 以前这两种写法算出两个不同的 key，一轮播放要去 115 解析两次（外网就是
+    // 两段等待叠加）。把缺省值归一后，第一次拿到直链，后面全部命中缓存。
+    const norm = function (v, fallback) { return v === '' ? fallback : v; };
     return String(rtMtime) + '|' + clientIp(r) + '|' + ua + '|' + r.uri
-        + '|' + g('path') + '|' + g('mediaIndex') + '|' + g('partIndex')
-        + '|' + g('directPlay');
+        + '|' + g('path') + '|' + norm(g('mediaIndex'), '0') + '|' + norm(g('partIndex'), '0')
+        + '|' + norm(g('directPlay'), '1');
 }
 
 function routeGet(key) {

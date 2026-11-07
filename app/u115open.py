@@ -31,7 +31,7 @@ AUTH_HOST = (os.getenv("P115_OPEN_AUTH_BASE") or "https://passportapi.115.com").
 API_HOST = (os.getenv("P115_OPEN_API_BASE") or "https://proapi.115.com").rstrip("/")
 QR_HOST = "https://qrcodeapi.115.com"
 
-TIMEOUT = 15
+TIMEOUT = 8  # 单次 115 请求上限；后端 /api/resolve 还有 8s 总闸，别让首播干等
 UA_FALLBACK = "Plex302/1.0"
 
 # access_token 过期错误码（115 用 4014xxxx 段）

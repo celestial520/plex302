@@ -67,6 +67,13 @@ _open_guard = threading.Lock()
 _OPEN_TTL_DEFAULT = 3600.0
 _OPEN_TTL_MAX = 6 * 3600.0
 
+# 路径 → pick_code。直链会过期（约 30 分钟）、每台设备 UA 又各自一份，
+# 但「这个路径对应哪个 pick_code」几乎不变。缓存它之后，换设备、拖动进度
+# 条、直链过期重取都只需 1 次 downurl，不再每次都先 folder/get_info ——
+# 首播链路从两次 115 往返压到一次，这是外网起播最直观的一段等待。
+_pick_cache: Dict[str, Dict[str, Any]] = {}
+_PICK_TTL = 6 * 3600.0
+
 
 def _open_url_ttl(url: str) -> float:
     """从 115 直链的 t=<过期时间戳> 读真实寿命，读不到给 1 小时。"""
@@ -107,6 +114,29 @@ def _open_cache_put(key: str, url: str, ttl: float) -> None:
         _open_cache[key] = {"value": url, "expire_at": time.time() + ttl}
 
 
+def _pick_cache_get(path: str) -> str:
+    with _open_guard:
+        item = _pick_cache.get(path)
+        if not item:
+            return ""
+        if float(item.get("expire_at") or 0) <= time.time():
+            _pick_cache.pop(path, None)
+            return ""
+        return str(item.get("value") or "")
+
+
+def _pick_cache_put(path: str, pick: str) -> None:
+    with _open_guard:
+        if len(_pick_cache) > 20000:
+            _pick_cache.clear()
+        _pick_cache[path] = {"value": pick, "expire_at": time.time() + _PICK_TTL}
+
+
+def _pick_cache_drop(path: str) -> None:
+    with _open_guard:
+        _pick_cache.pop(path, None)
+
+
 def _open_link_url(cfg: Dict[str, Any], pick: str, ua: str) -> str:
     """pick_code → 直链，带缓存 + 单飞：并发起播只打一次 115。"""
     key = f"{pick}|{ua}"
@@ -114,7 +144,9 @@ def _open_link_url(cfg: Dict[str, Any], pick: str, ua: str) -> str:
     if cached:
         return cached
     lock = _open_lock(key)
-    if not lock.acquire(timeout=20):
+    # 以前等 20 秒：并发起播时后到的请求可能干等满 20 秒才报错，
+    # 播放器早就断了。后端整体只有 8 秒硬上限，锁不该比它还长。
+    if not lock.acquire(timeout=6):
         raise ProviderError("115 直链解析排队超时，稍后重试")
     try:
         cached = _open_cache_get(key)
@@ -130,8 +162,22 @@ def _open_link_url(cfg: Dict[str, Any], pick: str, ua: str) -> str:
 def _resolve_open115(cfg: Dict[str, Any], cloud_path: str, ctx: ResolveContext) -> Link:
     ua = _ua(cfg, ctx)
     try:
-        pick = u115open.pickcode_by_path(cfg, cloud_path, ua)
-        url = _open_link_url(cfg, pick, ua)
+        pick = _pick_cache_get(cloud_path)
+        from_cache = bool(pick)
+        if not pick:
+            pick = u115open.pickcode_by_path(cfg, cloud_path, ua)
+            _pick_cache_put(cloud_path, pick)
+        try:
+            url = _open_link_url(cfg, pick, ua)
+        except u115open.Open115Error:
+            if not from_cache:
+                raise
+            # 缓存里的 pick_code 可能因文件被移动/重新入库而失效。丢掉重取一次，
+            # 比直接回源 Plex 好；新取的 pick 再失败就算了，不要越拖越久。
+            _pick_cache_drop(cloud_path)
+            pick = u115open.pickcode_by_path(cfg, cloud_path, ua)
+            _pick_cache_put(cloud_path, pick)
+            url = _open_link_url(cfg, pick, ua)
     except u115open.Open115Error as err:
         # 没登录/过期/接口抽风：有 Cookie 就退回 Cookie 逐级解析，别让播放挂掉
         if u115web.has_cookie(cfg):

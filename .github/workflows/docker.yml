@@ -53,6 +53,7 @@ jobs:
           python3 tests/test_no_block.py
           python3 tests/test_selftest.py
           python3 tests/test_partindex.py
+          python3 tests/test_fast_resolve.py
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
