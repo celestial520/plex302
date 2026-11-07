@@ -15,15 +15,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from . import (
-    auth, cd2, config, events, indexer, ingest, logger, notify, plex, resolver,
-    partindex, scanner, scheduler, selftest, store, u115events, u115open, u115ops, u115web,
-    u115weblogin,
-    watcher,
+    auth, cd2, classify, config, events, indexer, ingest, logger, mediarec, notify,
+    openfs, organizer, plex, renametpl, resolver, partindex, scanner, scheduler,
+    selftest, store, u115events, u115open, u115ops, u115web, u115weblogin, watcher,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-VERSION = "1.8.21"
+VERSION = "1.9.0"
 
 PUBLIC_PATHS = {
     "/login", "/api/login", "/health", "/favicon.ico", "/api/resolve", "/api/hook",
@@ -46,11 +45,13 @@ async def lifespan(app: FastAPI):
     await watcher.watcher.start()
     await events.event_watcher.start()
     await scheduler.scheduler.start()
+    await organizer.organizer.start()
     notify_task = asyncio.create_task(notify.flush_loop(), name="notify-flush")
     log_task = asyncio.create_task(_tail_302_log(), name="302-log")
     yield
     log_task.cancel()
     notify_task.cancel()
+    await organizer.organizer.stop()
     await scheduler.scheduler.stop()
     await events.event_watcher.stop()
     await watcher.watcher.stop()
@@ -1155,6 +1156,123 @@ def _nginx_302_lines(limit: int = 60) -> List[str]:
 
 
 # --------------------------------------------------------------------- 日志
+# ------------------------------------------------------- 自动整理（115 官方接口）
+@app.get("/api/organize/status")
+async def api_organize_status() -> Any:
+    return _ok(organizer.organizer.status())
+
+
+@app.get("/api/organize/last")
+async def api_organize_last() -> Any:
+    import json
+    raw = store.state_get("organize_last") or ""
+    try:
+        return _ok(json.loads(raw) if raw else {})
+    except ValueError:
+        return _ok({})
+
+
+@app.post("/api/organize/preview")
+async def api_organize_preview() -> Any:
+    """只生成计划，不调用任何写接口，绝不动文件。"""
+    cfg = config.load()
+    result = await asyncio.to_thread(organizer.organizer.run, cfg, True)
+    return _ok(result)
+
+
+@app.post("/api/organize/run")
+async def api_organize_run(request: Request) -> Any:
+    """真正移动文件：必须带 {"confirm": true}，防止误触。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict) or not body.get("confirm"):
+        return _err("需要确认才会实际移动文件")
+    cfg = config.load()
+    result = await asyncio.to_thread(organizer.organizer.run, cfg, False)
+    return _ok(result)
+
+
+@app.post("/api/organize/tmdb/test")
+async def api_organize_tmdb_test(request: Request) -> Any:
+    """用输入框当前值测试，不必先保存。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    cfg = config.load()
+    t = cfg["organize"].setdefault("tmdb", {})
+    if isinstance(body, dict):
+        for key in ("api_key", "api_base", "language"):
+            if body.get(key):
+                t[key] = str(body[key])
+    return _ok(await asyncio.to_thread(mediarec.TMDB(cfg).test))
+
+
+@app.post("/api/organize/ai/test")
+async def api_organize_ai_test(request: Request) -> Any:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    cfg = config.load()
+    a = cfg["organize"].setdefault("ai", {})
+    if isinstance(body, dict):
+        for key in ("api_key", "api_base", "model"):
+            if body.get(key):
+                a[key] = str(body[key])
+    return _ok(await asyncio.to_thread(mediarec.AIRec(cfg).test))
+
+
+@app.get("/api/organize/dirs")
+async def api_organize_dirs(path: str = "/") -> Any:
+    """只读列目录，帮用户在设置页挑待整理/目标文件夹。"""
+    cfg = config.load()
+    try:
+        cid = await asyncio.to_thread(openfs.ensure_dir, cfg, path, False)
+        if not cid:
+            return _err(f"目录不存在：{path}")
+        items = await asyncio.to_thread(openfs.list_dir, cfg, cid)
+    except Exception as err:  # noqa: BLE001
+        return _err(str(err))
+    dirs = [{"name": i["name"], "path": path.rstrip("/") + "/" + i["name"]}
+            for i in items if i["is_dir"]]
+    return _ok({"path": path, "dirs": sorted(dirs, key=lambda x: x["name"])[:300]})
+
+
+@app.post("/api/organize/parse")
+async def api_organize_parse(request: Request) -> Any:
+    """试跑：给一个文件名，看识别结果和渲染后的目标名（只读）。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    name = str((body or {}).get("name") or "")
+    if not name:
+        return _err("请填一个文件名")
+    cfg = config.load()
+    org = cfg["organize"]
+    info = await asyncio.to_thread(mediarec.recognize, name, cfg)
+    if not info:
+        return _ok({"ok": False, "error": "识别失败（会进冗余数据文件夹）"})
+    policy = classify.parse_policy(org.get("policy") or classify.DEFAULT_POLICY)
+    category = classify.pick(policy, info["_type"], info.get("_tmdb") or {}, info["ext"])
+    r = org.get("rename") or {}
+    if info["_type"] == "movie":
+        folder = renametpl.render(r.get("movie_folder") or "", info)
+        filename = renametpl.with_ext(renametpl.render(r.get("movie_file") or "", info), info["ext"])
+        target = f"/{org['media_root'].strip('/')}/{org['movie_dir']}/{category}/{folder}/{filename}"
+    else:
+        folder = renametpl.render(r.get("tv_folder") or "", info)
+        season = renametpl.render(r.get("season_folder") or "Season {season_num:02d}", info)
+        filename = renametpl.with_ext(renametpl.render(r.get("episode_file") or "", info), info["ext"])
+        target = f"/{org['media_root'].strip('/')}/{org['tv_dir']}/{category}/{folder}/{season}/{filename}"
+    return _ok({"ok": True, "type": info["_type"], "title": info["title"],
+                "year": info["year"], "tmdb_id": info["tmdb_id"],
+                "category": category, "target": target})
+
+
 @app.get("/api/logs")
 async def api_logs(
     lines: int = 300, keyword: str = "", level: str = "all", module: str = ""

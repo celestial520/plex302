@@ -32,6 +32,27 @@ PAGE_BUDGET_MAX = 200  # 积压时最多加深到 200 页（2 万条），再追
 MAX_EVENT_RETRY = 5  # 单条事件处理失败最多重试 5 轮，之后放弃并告警（避免无限重试）
 
 
+def in_media_roots(cfg: Dict[str, Any], cloud_path: str) -> bool:
+    """这条事件路径是否落在 Plex 媒体库映射的云盘前缀里。
+
+    115 生活事件是**整个网盘**的操作流水：冗余数据、已存在、待整理、随手
+    存的图片都会推过来。以前每条都去反查父目录（网页 Cookie 接口 + 2 秒
+    节奏），再打一条「映射不到 Plex 路径」的 WARN —— 既刷屏，又会把 115
+    风控窗口和起播链路一起拖慢。这里先按挂载前缀挡掉无关目录。
+    """
+    path = "/" + str(cloud_path or "").replace("\\", "/").strip("/")
+    mounts = cfg.get("mounts") or []
+    if not mounts:
+        return True
+    for mount in mounts:
+        base = str(mount.get("cloud_prefix") or "/").rstrip("/")
+        if not base or base == "/":
+            return True  # 整盘映射，不做过滤
+        if path == base or path.startswith(base + "/"):
+            return True
+    return False
+
+
 def _join(folder: str, name: str) -> str:
     folder = (folder or "/").rstrip("/")
     return (folder + "/" + name.lstrip("/")) if folder else "/" + name.lstrip("/")
@@ -65,6 +86,10 @@ class EventWatcher:
         self._page_budget: int = HARD_MAX_PAGES
         self._warned: set[str] = set()
         self._force_next = False
+        # 已确认「不在 Plex 媒体库映射内」的父目录 cid。
+        # 同一目录后续事件直接跳过，连反查目录的 115 请求都不发。
+        self._outside_dirs: set[str] = set()
+        self._outside_reported: set[str] = set()
 
     # ------------------------------------------------------------------ 生命周期
     async def start(self) -> None:
@@ -260,13 +285,24 @@ class EventWatcher:
                 skipped += 1
                 continue
 
+            parent_id = str(item.get("parent_id") or "")
+            only_media = bool(cfg_events.get("only_media_paths", True))
+            if only_media and parent_id and parent_id in self._outside_dirs:
+                # 这个父目录已经确认跟 Plex 无关：连反查目录的 115 请求都省掉，
+                # 免得 7 条无关事件按 2 秒节奏拖出十几秒，还把风控窗口占住。
+                store.mark_event(
+                    item["id"], item["type"], item["name"], item["file_id"], "", "", "", item["time"]
+                )
+                skipped += 1
+                continue
+
             folder = "/"
             if item["type"] in (18, 20) or (item["is_dir"] and item["type"] in (5, 6)):
                 u115web.clear_path_cache()
                 u115web.clear_file_cache()
-            if item.get("parent_id"):
+            if parent_id:
                 try:
-                    folder = await asyncio.to_thread(u115web.folder_path, cfg, item["parent_id"])
+                    folder = await asyncio.to_thread(u115web.folder_path, cfg, parent_id)
                 except u115web.Web115Error as err:
                     if self._failed(item, f"反查目录失败：{err}"):
                         need_retry = True
@@ -274,11 +310,29 @@ class EventWatcher:
                     continue
                 await asyncio.sleep(EVENT_DELAY)
             cloud_path = _join(folder, item["name"])
+
+            if only_media and not in_media_roots(cfg, cloud_path):
+                # 冗余数据 / 已存在 / 待整理 / 随手存的图片等等都不属于 Plex 媒体库。
+                # 静默跳过：不写播放索引、不刷旧路径、不打「映射不到」的 WARN。
+                if parent_id:
+                    self._outside_dirs.add(parent_id)
+                    if parent_id not in self._outside_reported:
+                        self._outside_reported.add(parent_id)
+                        logger.info(
+                            f"[115事件] 已忽略非媒体库目录：{folder}"
+                            "（Plex 只映射了挂载前缀内的路径，可在设置里关闭此过滤）"
+                        )
+                store.mark_event(
+                    item["id"], item["type"], item["name"], item["file_id"], cloud_path, "", "", item["time"]
+                )
+                skipped += 1
+                continue
+
+            # 下面只处理确实落在 Plex 媒体库里的事件。
             # 事件本身就带 pick_code：顺手写进播放索引，之后起播只打 1 次 115。
-            # 这一步不额外发请求，纯白嫖事件里的数据。
             if item.get("pick_code") and not item["is_dir"]:
                 store.index_put(
-                    cloud_path, item["pick_code"], item["size"], item["name"], item.get("parent_id") or ""
+                    cloud_path, item["pick_code"], item["size"], item["name"], parent_id
                 )
             if item["type"] == u115events.TYPE_DELETE:
                 store.index_delete(cloud_path)

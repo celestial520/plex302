@@ -55,6 +55,8 @@ jobs:
           python3 tests/test_partindex.py
           python3 tests/test_fast_resolve.py
           python3 tests/test_hardening.py
+          python3 tests/test_organize.py
+          python3 tests/test_event_filter.py
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

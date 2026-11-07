@@ -117,6 +117,10 @@ DEFAULTS: dict[str, Any] = {
         "verify_delay": 180,     # 复核延迟（秒）
         "cooldown_seconds": 120, # 同一目录两次扫描的最小间隔（防事件风暴）
         "recent_fallback": False, # 同时检查“最近文件”：可选兜底，默认关（见 README 风控说明）
+        # 115 生活事件是**整个网盘**的操作流水。只处理落在媒体库挂载前缀内的
+        # 路径；冗余数据 / 已存在 / 待整理等目录静默跳过，省掉反查目录的网页
+        # 接口请求 + 2 秒节奏（无关事件能把起播拖出十几秒，还会占风控窗口）。
+        "only_media_paths": True,
     },
     "notify": {
         "wecom_enabled": False,
@@ -140,6 +144,67 @@ DEFAULTS: dict[str, Any] = {
         "url_cache_ttl": 21600,
         "route_cache": True,   # nginx 共享内存直链缓存（对齐 plex-demo 的 routeDict）
         "log_redirects": True,
+    },
+    # 自动整理：定时把「待整理」里的影片按 TMDB + 二级分类归类到 /media。
+    # 全部走 115 官方开放平台；默认关闭且默认只预览，绝不擅自移动文件。
+    "organize": {
+        "enabled": False,
+        "dry_run": True,
+        "interval": 3600,
+        "source_dir": "/待整理",
+        "media_root": "/media",
+        "movie_dir": "电影",
+        "tv_dir": "电视剧",
+        "exists_dir": "/已存在",
+        "junk_dir": "/冗余数据",
+        "delete_empty": True,
+        "max_items": 50,
+        "min_size_mb": 20,
+        "api_gap": 1.5,
+        "video_exts": [
+            ".mkv", ".mp4", ".avi", ".mov", ".ts", ".m2ts", ".iso", ".rmvb",
+            ".wmv", ".m4v", ".flv", ".webm", ".mpg", ".mpeg",
+        ],
+        "sub_exts": [".srt", ".ass", ".ssa", ".sub", ".vtt", ".smi", ".idx"],
+        "tmdb": {
+            "api_base": "https://api.tmdb.org",
+            "image_base": "https://image.tmdb.org",
+            "api_key": "",
+            "language": "zh-CN",
+        },
+        "ai": {
+            "mode": "assist",  # disabled | assist | force
+            "api_base": "https://api.deepseek.com",
+            "model": "deepseek-chat",
+            "api_key": "",
+        },
+        "rename": {
+            "movie_folder": "{first_letter}-{title}-{year}-[tmdb={tmdb_id}]",
+            "movie_file": "{title}.{year}<.{resource_pix}><.{fps}><.{resource_version}><.{resource_source}><.{resource_type}><.{resource_effect}><.{video_encode}><.{audio_encode}><-{resource_team}>",
+            "tv_folder": "{first_letter}-{title}-{year}-[tmdb={tmdb_id}]",
+            "season_folder": "Season {season_num:02d}",
+            "episode_file": "{title}.{year}.{season_episode}<.{resource_pix}><.{fps}><.{resource_version}><.{resource_source}><.{resource_type}><.{resource_effect}><.{video_encode}><.{audio_encode}><-{resource_team}>",
+        },
+        # 按书写顺序匹配，多条件需同时满足，都不中就用最后一个分类。
+        # 分类名即目标目录名；本项目按路径定位，不需要 CMS 的 cid。
+        "policy": (
+            "# 电影分类策略（按顺序匹配，都不中就用最后一个）\n"
+            "movie:\n"
+            "  动画电影:\n    genre_ids: '16'\n"
+            "  华语电影:\n    original_language: 'zh,cn,bo,za'\n"
+            "  外语电影:\n\n"
+            "# 电视剧分类策略\n"
+            "tv:\n"
+            "  儿童:\n    genre_ids: '10762'\n"
+            "  国漫:\n    genre_ids: '16'\n    origin_country: 'CN,TW,HK'\n"
+            "  日番:\n    genre_ids: '16'\n    origin_country: 'JP'\n"
+            "  纪录片:\n    genre_ids: '99'\n"
+            "  综艺:\n    genre_ids: '10764,10767'\n"
+            "  国产剧:\n    origin_country: 'CN,TW,HK'\n"
+            "  欧美剧:\n    origin_country: 'US,FR,GB,DE,ES,IT,NL,PT,RU,UK'\n"
+            "  日韩剧:\n    origin_country: 'JP,KP,KR,TH,IN,SG'\n"
+            "  其它:\n"
+        ),
     },
 }
 
@@ -453,6 +518,13 @@ def masked(cfg: dict) -> dict:
     out["security"].pop("password_hash", None)
     out["notify"]["wecom_secret_set"] = bool(out["notify"].get("wecom_secret"))
     out["notify"]["wecom_secret"] = ""
+    org = out.setdefault("organize", {})
+    tmdb = org.setdefault("tmdb", {})
+    tmdb["api_key_set"] = bool(tmdb.get("api_key"))
+    tmdb["api_key"] = ""
+    ai = org.setdefault("ai", {})
+    ai["api_key_set"] = bool(ai.get("api_key"))
+    ai["api_key"] = ""
     out["security"].pop("secret", None)
     return out
 
@@ -490,4 +562,11 @@ def merge_secrets(new_cfg: dict, old_cfg: dict) -> dict:
     notify.pop("wecom_secret_set", None)
     if not notify.get("wecom_secret"):
         notify["wecom_secret"] = old_cfg.get("notify", {}).get("wecom_secret", "")
+    org = new_cfg.setdefault("organize", {})
+    old_org = old_cfg.get("organize", {})
+    for sub, field in (("tmdb", "api_key"), ("ai", "api_key")):
+        section = org.setdefault(sub, {})
+        section.pop(field + "_set", None)
+        if not section.get(field):
+            section[field] = (old_org.get(sub) or {}).get(field, "")
     return new_cfg

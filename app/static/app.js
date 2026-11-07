@@ -813,6 +813,68 @@
           </div>
         </div>
       `, true)}
+
+      ${(() => { const o = c.organize || {}; const t = o.tmdb || {}; const a = o.ai || {}; const r = o.rename || {}; return `
+      ${section('自动整理 · 基础与目录', '定时把「待整理」里的影片按 TMDB + 二级分类整理到 /media。<b>全部走 115 官方开放平台接口</b>，不碰网页 Cookie 接口，避免风控。', `
+        <div class="field full"><div class="callout info">默认<b>关闭</b>且默认<b>只预览</b>。请先点「预览整理」核对计划，确认无误后再关掉预览模式、打开「启用定时自动整理」。执行时每个官方接口请求间隔 ${esc(String(o.api_gap ?? 1.5))} 秒，单轮最多 ${esc(String(o.max_items ?? 50))} 个文件。</div></div>
+        <div class="field full">
+          ${switchLine('启用定时自动整理', '关闭时只会响应你手动点的按钮，绝不自动动文件', 'cfg-org-enabled', !!o.enabled)}
+          ${switchLine('预览模式（只出计划，不移动）', '强烈建议先保持打开；关掉后「立即整理」才会真的移动文件', 'cfg-org-dry', o.dry_run !== false)}
+          ${switchLine('整理后删除空文件夹', '只删待整理目录内、确认已空的子目录；不会碰媒体库', 'cfg-org-clean', o.delete_empty !== false)}
+          ${switchLine('忽略非媒体库目录的 115 事件', '冗余数据 / 已存在 / 待整理等目录的变动直接跳过，不再反查目录、不再刷「映射不到」告警，也不会拖慢起播', 'cfg-events-only-media', c.events.only_media_paths !== false)}
+        </div>
+        <div class="field"><label>整理周期</label>${dur('cfg-org-interval', o.interval || 3600)}</div>
+        <div class="field"><label>单轮最多处理（个）</label>${input('cfg-org-max', o.max_items ?? 50)}</div>
+        <div class="field"><label>待整理目录</label>${input('cfg-org-source', o.source_dir, '/待整理')}</div>
+        <div class="field"><label>媒体库根目录</label>${input('cfg-org-root', o.media_root, '/media')}</div>
+        <div class="field"><label>电影一级目录</label>${input('cfg-org-movie', o.movie_dir, '电影')}</div>
+        <div class="field"><label>电视剧一级目录</label>${input('cfg-org-tv', o.tv_dir, '电视剧')}</div>
+        <div class="field"><label>已存在 → 移到</label>${input('cfg-org-exists', o.exists_dir, '/已存在')}</div>
+        <div class="field"><label>失败 / 冗余 → 移到</label>${input('cfg-org-junk', o.junk_dir, '/冗余数据')}</div>
+        <div class="field"><label>官方接口间隔（秒）</label>${input('cfg-org-gap', o.api_gap ?? 1.5)}</div>
+        <div class="field"><label>最小视频体积（MB）</label>${input('cfg-org-minsize', o.min_size_mb ?? 20)}</div>
+      `, true)}
+
+      ${section('TMDB 配置', '用于媒体识别与二级分类（genres / 语种 / 国家）。密钥只存在 NAS 的配置里，接口返回一律脱敏。', `
+        <div class="field"><label>API 域名</label>${input('cfg-tmdb-base', t.api_base, 'https://api.tmdb.org')}</div>
+        <div class="field"><label>图片域名</label>${input('cfg-tmdb-image', t.image_base, 'https://image.tmdb.org')}</div>
+        <div class="field"><label>API 密钥</label>${input('cfg-tmdb-key', '', t.api_key_set ? '已保存，留空不修改' : '填 TMDB API Key（v3）', 'password')}</div>
+        <div class="field"><label>语言</label><select class="input" id="cfg-tmdb-lang"><option value="zh-CN" ${(t.language || 'zh-CN') === 'zh-CN' ? 'selected' : ''}>中文</option><option value="en-US" ${t.language === 'en-US' ? 'selected' : ''}>英文</option></select></div>
+        <div class="field full"><div class="field-row"><button class="btn sm" id="btn-tmdb-test">测试 TMDB</button><span class="desc" id="tmdb-test-result"></span></div></div>
+      `)}
+
+      ${section('AI 识别（识别失败时兜底）', '支持任何 OpenAI 协议的服务（DeepSeek / 硅基流动等）。「辅助使用」= 本地 + TMDB 认不出来时才问 AI；AI 给的结果仍会回 TMDB 校验。', `
+        <div class="field"><label>状态</label><select class="input" id="cfg-ai-mode"><option value="disabled" ${(a.mode || 'assist') === 'disabled' ? 'selected' : ''}>禁用</option><option value="assist" ${(a.mode || 'assist') === 'assist' ? 'selected' : ''}>辅助使用（推荐）</option><option value="force" ${a.mode === 'force' ? 'selected' : ''}>强制使用</option></select></div>
+        <div class="field"><label>OpenAI 地址</label>${input('cfg-ai-base', a.api_base, 'https://api.deepseek.com')}</div>
+        <div class="field"><label>模型</label>${input('cfg-ai-model', a.model, 'deepseek-chat')}</div>
+        <div class="field"><label>密钥</label>${input('cfg-ai-key', '', a.api_key_set ? '已保存，留空不修改' : 'sk-...', 'password')}</div>
+        <div class="field full"><div class="field-row"><button class="btn sm" id="btn-ai-test">测试 AI</button><span class="desc" id="ai-test-result"></span></div></div>
+      `)}
+
+      ${section('重命名规则', '对齐 CMS 语法：<code>{变量}</code> 直接取值，<code>&lt;...&gt;</code> 是块（块内变量为空则整块省略），支持 <code>{season_num:02d}</code> 格式与 <code>.upper()</code> 等字符串方法。扩展名自动补。', `
+        <div class="field full"><label>电影文件夹</label>${input('cfg-ren-mfolder', r.movie_folder, '{first_letter}-{title}-{year}-[tmdb={tmdb_id}]')}</div>
+        <div class="field full"><label>电影文件</label>${input('cfg-ren-mfile', r.movie_file, '{title}.{year}<.{resource_pix}>')}</div>
+        <div class="field full"><label>剧集文件夹</label>${input('cfg-ren-tfolder', r.tv_folder, '{first_letter}-{title}-{year}-[tmdb={tmdb_id}]')}</div>
+        <div class="field"><label>季文件夹</label>${input('cfg-ren-season', r.season_folder, 'Season {season_num:02d}')}</div>
+        <div class="field full"><label>集文件</label>${input('cfg-ren-episode', r.episode_file, '{title}.{year}.{season_episode}')}</div>
+        <div class="field full"><span class="desc">可用变量：<code>title year tmdb_id first_letter original_name season_episode season_num episode_num resource_pix resource_type resource_effect resource_version resource_source video_encode audio_encode resource_team fps</code>。<code>first_letter</code> 是标题的拼音首字母。</span></div>
+      `, true)}
+
+      ${section('二级分类策略', '按书写顺序匹配，一个分类里的多个条件需<b>同时满足</b>；都不中就用最后一个分类。分类名即目标目录名（本项目按路径定位，不需要 CMS 的 cid）。', `
+        <div class="field full"><label>策略 YAML</label><textarea class="input mono" id="cfg-org-policy" rows="14">${esc(o.policy || '')}</textarea>
+          <span class="desc">支持 <code>genre_ids</code> / <code>original_language</code> / <code>origin_country</code> / <code>production_countries</code> / <code>ext</code>。电影落到 <code>/media/电影/分类名/</code>，剧集落到 <code>/media/电视剧/分类名/</code>。</span></div>
+      `, true)}
+
+      ${section('整理操作', '先预览、再执行。预览完全只读，不会调用任何 115 写接口。', `
+        <div class="field full"><div class="field-row">
+          <button class="btn sm" id="btn-org-preview">预览整理</button>
+          <button class="btn sm ghost" id="btn-org-run">立即整理（真正移动）</button>
+          <button class="btn sm" id="btn-org-parse">试识别一个文件名</button>
+        </div></div>
+        <div class="field full"><div class="field-row">${input('cfg-org-parse-name', '', '例：无赦之仇.2025.S01E01.2160p.WEB-DL.mkv')}</div></div>
+        <div class="field full"><div class="result-box" id="organize-result">点「预览整理」查看将要移动的文件清单；确认后再执行。</div></div>
+      `, true)}
+      `; })()}
     `;
     $('#settings-body').innerHTML = html;
     bindSettings();
@@ -878,6 +940,73 @@
   }
 
   function bindSettings() {
+    // ---------------------------------------------------------- 自动整理
+    const gv = (id) => { const n = $('#' + id); return n ? String(n.value || '').trim() : ''; };
+    const orgOut = () => $('#organize-result');
+    const orgRender = (d) => {
+      const el = orgOut(); if (!el) return;
+      const rows = (d.plans || []).slice(0, 40).map((p) =>
+        `<div style="padding:5px 0;border-bottom:1px solid rgba(128,128,128,.18);font-size:12px;word-break:break-all">` +
+        `<b>${esc(p.action)}</b> · ${esc(p.from)} → ${esc(p.to || '')}` +
+        `<br><span style="opacity:.7">${esc(p.reason || '')}</span></div>`).join('');
+      const errs = (d.errors || []).length
+        ? `<div style="color:var(--red);margin-top:8px">${esc(d.errors.join('；'))}</div>` : '';
+      el.innerHTML = `<div class="callout ${d.ok ? 'info' : 'bad'}">` +
+        `${d.dry_run ? '预览（未改动任何文件）' : '已执行'}：扫描 ${d.scanned || 0} · ` +
+        `移动 ${d.moved || 0} · 已存在 ${d.exists || 0} · 冗余 ${d.junk || 0} · ` +
+        `失败 ${d.failed || 0} · 清空目录 ${d.deleted_dirs || 0} · 耗时 ${d.cost || 0}s</div>` +
+        (rows || '<p>没有需要处理的文件</p>') + errs;
+    };
+    const orgRun = async (url, body, busy) => {
+      const el = orgOut(); if (el) el.textContent = busy;
+      try {
+        const res = await api(url, { method: 'POST', body: body || {} });
+        orgRender(res.data || {});
+      } catch (err) {
+        if (el) el.innerHTML = `<span style="color:var(--red)">${esc(err.message || '请求失败')}</span>`;
+      }
+    };
+    const $btn = (id, fn) => { const n = $(id); if (n) n.addEventListener('click', fn); };
+    $btn('#btn-org-preview', () => orgRun('/api/organize/preview', {}, '正在生成预览（只读）…'));
+    $btn('#btn-org-run', () => {
+      if (!window.confirm('确认要真正移动 115 里的文件吗？\n\n请先用「预览整理」核对清单，并确认已关闭「预览模式」。')) return;
+      orgRun('/api/organize/run', { confirm: true }, '正在整理，请勿关闭页面…');
+    });
+    $btn('#btn-org-parse', async () => {
+      const name = gv('cfg-org-parse-name');
+      if (!name) { toast('先填一个文件名', 'bad'); return; }
+      const el = orgOut(); if (el) el.textContent = '识别中…';
+      try {
+        const res = await api('/api/organize/parse', { method: 'POST', body: { name } });
+        const d = res.data || {};
+        if (el) el.innerHTML = d.ok
+          ? `<div class="callout info">${esc(d.type)} · ${esc(d.title)} (${esc(d.year)}) · tmdb=${esc(d.tmdb_id)} · 分类 <b>${esc(d.category)}</b><br>目标：<code>${esc(d.target)}</code></div>`
+          : `<div class="callout bad">${esc(d.error || '识别失败，这个文件会进冗余数据文件夹')}</div>`;
+      } catch (err) { if (el) el.textContent = err.message || '请求失败'; }
+    });
+    $btn('#btn-tmdb-test', async () => {
+      const el = $('#tmdb-test-result'); if (el) el.textContent = '测试中…';
+      try {
+        const res = await api('/api/organize/tmdb/test', { method: 'POST', body: {
+          api_base: gv('cfg-tmdb-base'), api_key: gv('cfg-tmdb-key'), language: gv('cfg-tmdb-lang'),
+        } });
+        if (el) el.innerHTML = res.data.ok
+          ? '<span style="color:var(--green)">TMDB 连接成功，记得点保存</span>'
+          : `<span style="color:var(--red)">${esc(res.data.error || '连接失败')}</span>`;
+      } catch (err) { if (el) el.textContent = err.message || '请求失败'; }
+    });
+    $btn('#btn-ai-test', async () => {
+      const el = $('#ai-test-result'); if (el) el.textContent = '测试中…';
+      try {
+        const res = await api('/api/organize/ai/test', { method: 'POST', body: {
+          api_base: gv('cfg-ai-base'), model: gv('cfg-ai-model'), api_key: gv('cfg-ai-key'),
+        } });
+        if (el) el.innerHTML = res.data.ok
+          ? '<span style="color:var(--green)">AI 返回有效 JSON，记得点保存</span>'
+          : `<span style="color:var(--red)">${esc(res.data.error || '测试失败')}</span>`;
+      } catch (err) { if (el) el.textContent = err.message || '请求失败'; }
+    });
+
     $('#btn-test-plex').addEventListener('click', async () => {
       const el = $('#plex-test-result');
       el.textContent = '测试中…';
@@ -1236,6 +1365,42 @@
     c.server.trust_forwarded_for = checked('cfg-trust-xff');
     c.server.redirect_lan = checked('cfg-redirect-lan');
     c.advanced.force_direct_play = checked('cfg-force-dp');
+    c.events.only_media_paths = checked('cfg-events-only-media');
+
+    // 自动整理：密钥留空表示不修改（后端 merge_secrets 会保留旧值）
+    const o = c.organize || (c.organize = {});
+    o.enabled = checked('cfg-org-enabled');
+    o.dry_run = checked('cfg-org-dry');
+    o.delete_empty = checked('cfg-org-clean');
+    o.interval = durValue('cfg-org-interval', 3600);
+    o.max_items = Number(val('cfg-org-max')) || 50;
+    o.source_dir = val('cfg-org-source') || '/待整理';
+    o.media_root = val('cfg-org-root') || '/media';
+    o.movie_dir = val('cfg-org-movie') || '电影';
+    o.tv_dir = val('cfg-org-tv') || '电视剧';
+    o.exists_dir = val('cfg-org-exists') || '/已存在';
+    o.junk_dir = val('cfg-org-junk') || '/冗余数据';
+    o.api_gap = Number(val('cfg-org-gap')) || 1.5;
+    o.min_size_mb = Number(val('cfg-org-minsize')) || 20;
+    o.tmdb = o.tmdb || {};
+    o.tmdb.api_base = val('cfg-tmdb-base') || 'https://api.tmdb.org';
+    o.tmdb.image_base = val('cfg-tmdb-image') || 'https://image.tmdb.org';
+    if (val('cfg-tmdb-key')) o.tmdb.api_key = val('cfg-tmdb-key');
+    o.tmdb.language = $('#cfg-tmdb-lang') ? $('#cfg-tmdb-lang').value : 'zh-CN';
+    o.ai = o.ai || {};
+    o.ai.mode = $('#cfg-ai-mode') ? $('#cfg-ai-mode').value : 'assist';
+    o.ai.api_base = val('cfg-ai-base');
+    o.ai.model = val('cfg-ai-model');
+    if (val('cfg-ai-key')) o.ai.api_key = val('cfg-ai-key');
+    o.rename = o.rename || {};
+    const ren = {
+      'cfg-ren-mfolder': 'movie_folder', 'cfg-ren-mfile': 'movie_file',
+      'cfg-ren-tfolder': 'tv_folder', 'cfg-ren-season': 'season_folder',
+      'cfg-ren-episode': 'episode_file',
+    };
+    Object.keys(ren).forEach((id) => { o.rename[ren[id]] = val(id); });
+    const policy = $('#cfg-org-policy');
+    if (policy) o.policy = policy.value;
     return c;
   }
 
